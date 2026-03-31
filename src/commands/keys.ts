@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { withClient, withErrorHandler } from "../action.js";
-import type { AgentKeysResponse } from "../api-types.js";
+import type { AgentKeysResponse, AgentRead, ListResponse } from "../api-types.js";
 import { getConfigDir } from "../config.js";
 import {
 	agentKeysExist,
@@ -14,7 +14,8 @@ import {
 	toBase64Url,
 } from "../crypto/keys.js";
 import { getAgentPublicKeys } from "../crypto/message.js";
-import { printError, printJson, printMutationOk } from "../output.js";
+import { RineApiError } from "../errors.js";
+import { printError, printJson, printMutationOk, printTable } from "../output.js";
 import { resolveAgent } from "../resolve-agent.js";
 
 interface KeyExport {
@@ -61,6 +62,93 @@ async function verifyServerKeys(
 
 export function registerKeys(program: Command): void {
 	const keys = program.command("keys").description("E2EE key management");
+
+	keys
+		.command("status")
+		.description("Show E2EE key status for an agent")
+		.option("--agent <id>", "Agent ID")
+		.action(
+			withClient(
+				program,
+				async ({ client, gOpts }, opts: { agent?: string }) => {
+					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+
+					// Find handle from agent list
+					const agents = (
+						await client.get("/agents")
+					) as ListResponse<AgentRead>;
+					const agent = agents.items.find((a) => a.id === agentId);
+					const handle = agent?.handle ?? "unknown";
+
+					const hasLocal = agentKeysExist(agentId);
+
+					let hasServer = false;
+					let serverKeys: AgentKeysResponse | undefined;
+					try {
+						serverKeys = (await client.get(
+							`/agents/${agentId}/keys`,
+						)) as AgentKeysResponse;
+						hasServer = true;
+					} catch (err) {
+						if (!(err instanceof RineApiError && err.status === 404)) {
+							throw err;
+						}
+					}
+
+					let sigFingerprint = "-";
+					let encFingerprint = "-";
+
+					if (hasLocal) {
+						const keys = loadAgentKeys(agentId);
+						sigFingerprint = toBase64Url(keys.signing.publicKey).slice(0, 8);
+						encFingerprint = toBase64Url(
+							keys.encryption.publicKey,
+						).slice(0, 8);
+					} else if (serverKeys) {
+						sigFingerprint = serverKeys.signing_public_key.x.slice(0, 8);
+						encFingerprint =
+							serverKeys.encryption_public_key.x.slice(0, 8);
+					}
+
+					const keysLabel = hasLocal && hasServer
+						? "local + server"
+						: hasLocal
+							? "local only"
+							: hasServer
+								? "server only"
+								: "none";
+
+					if (gOpts.json) {
+						printJson({
+							agent_id: agentId,
+							handle,
+							local_keys: hasLocal,
+							server_keys: hasServer,
+							signing_fingerprint:
+								sigFingerprint !== "-" ? sigFingerprint : null,
+							encryption_fingerprint:
+								encFingerprint !== "-" ? encFingerprint : null,
+						});
+					} else {
+						printTable([
+							{ Field: "Agent ID", Value: agentId },
+							{ Field: "Handle", Value: handle },
+							{ Field: "Local Keys", Value: hasLocal ? "yes" : "no" },
+							{ Field: "Server Keys", Value: hasServer ? "yes" : "no" },
+							{ Field: "Keys", Value: keysLabel },
+							{
+								Field: "Signing Fingerprint",
+								Value: sigFingerprint,
+							},
+							{
+								Field: "Encryption Fingerprint",
+								Value: encFingerprint,
+							},
+						]);
+					}
+				},
+			),
+		);
 
 	keys
 		.command("generate")

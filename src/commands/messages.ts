@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
 import type { MessageRead, PaginatedResponse } from "../api-types.js";
@@ -53,6 +54,40 @@ function inboxRow(m: MessageRead): Record<string, unknown> {
 	};
 }
 
+function resolvePayload(
+	payload?: string,
+	payloadFile?: string,
+): { parsed: unknown } | { error: string } {
+	if (payload !== undefined && payloadFile !== undefined) {
+		return { error: "--payload and --payload-file are mutually exclusive" };
+	}
+	if (payload === undefined && payloadFile === undefined) {
+		return { error: "Provide --payload or --payload-file" };
+	}
+
+	let raw: string;
+	if (payloadFile !== undefined) {
+		try {
+			raw =
+				payloadFile === "-"
+					? fs.readFileSync(0, "utf-8")
+					: fs.readFileSync(payloadFile, "utf-8");
+		} catch (err) {
+			return {
+				error: `Cannot read payload file: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	} else {
+		raw = payload!;
+	}
+
+	try {
+		return { parsed: JSON.parse(raw) };
+	} catch {
+		return { error: "Payload must be valid JSON" };
+	}
+}
+
 function addMessageCommands(parent: Command, program: Command): void {
 	parent
 		.command("send")
@@ -61,8 +96,9 @@ function addMessageCommands(parent: Command, program: Command): void {
 			"--to <address>",
 			"Recipient: agent handle, agent ID, or #group@org handle",
 		)
-		.requiredOption("--type <type>", "Message type (e.g. rine.v1.task_request)")
-		.requiredOption("--payload <json>", "Message payload as JSON string")
+		.option("--type <type>", "Message type (default: rine.v1.dm)")
+		.option("--payload <json>", "Message payload as JSON string")
+		.option("--payload-file <path>", "Read payload JSON from file (use - for stdin)")
 		.option("--from <address>", "Sender address (agent ID or handle with @)")
 		.option("--idempotency-key <key>", "Idempotency key header")
 		.action(
@@ -72,20 +108,20 @@ function addMessageCommands(parent: Command, program: Command): void {
 					{ client, gOpts },
 					opts: {
 						to: string;
-						type: string;
-						payload: string;
+						type?: string;
+						payload?: string;
+						payloadFile?: string;
 						from?: string;
 						idempotencyKey?: string;
 					},
 				) => {
-					let parsedPayload: unknown;
-					try {
-						parsedPayload = JSON.parse(opts.payload);
-					} catch {
-						printError("--payload must be valid JSON");
+					const result = resolvePayload(opts.payload, opts.payloadFile);
+					if ("error" in result) {
+						printError(result.error);
 						process.exitCode = 2;
 						return;
 					}
+					const parsedPayload = result.parsed;
 
 					const extraHeaders: Record<string, string> = {};
 					let senderAgentId: string | undefined;
@@ -97,7 +133,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 						senderAgentId = await resolveAgent(client, undefined, undefined);
 						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else {
-						senderAgentId = await resolveToUuid(gOpts.as);
+						senderAgentId = await resolveAgent(client, undefined, gOpts.as);
 					}
 
 					if (opts.idempotencyKey) {
@@ -113,7 +149,8 @@ function addMessageCommands(parent: Command, program: Command): void {
 					}
 
 					// Build body with encryption
-					const body: Record<string, unknown> = { type: opts.type };
+					const resolvedType = opts.type ?? "rine.v1.dm";
+					const body: Record<string, unknown> = { type: resolvedType };
 
 					if (opts.to.includes("@")) {
 						body.to_handle = opts.to;
@@ -362,24 +399,24 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.command("reply")
 		.description("Reply to a message (encrypted)")
 		.argument("<message-id>", "Message ID to reply to")
-		.requiredOption("--type <type>", "Message type")
-		.requiredOption("--payload <json>", "Reply payload as JSON string")
+		.option("--type <type>", "Message type (defaults to original message type)")
+		.option("--payload <json>", "Reply payload as JSON string")
+		.option("--payload-file <path>", "Read payload JSON from file (use - for stdin)")
 		.action(
 			withClient(
 				program,
 				async (
 					{ client, gOpts },
 					messageId: string,
-					opts: { type: string; payload: string },
+					opts: { type?: string; payload?: string; payloadFile?: string },
 				) => {
-					let parsedPayload: unknown;
-					try {
-						parsedPayload = JSON.parse(opts.payload);
-					} catch {
-						printError("--payload must be valid JSON");
+					const result = resolvePayload(opts.payload, opts.payloadFile);
+					if ("error" in result) {
+						printError(result.error);
 						process.exitCode = 2;
 						return;
 					}
+					const parsedPayload = result.parsed;
 
 					// Fetch the original message to get the sender (our reply recipient)
 					const original = (await client.get(
@@ -389,8 +426,10 @@ function addMessageCommands(parent: Command, program: Command): void {
 					const senderAgentId = await resolveAgent(client, undefined, gOpts.as);
 					const recipientAgentId = original.from_agent_id;
 
+					const resolvedType = opts.type ?? original.type;
+
 					try {
-						const body: Record<string, unknown> = { type: opts.type };
+						const body: Record<string, unknown> = { type: resolvedType };
 
 						if (!recipientAgentId || !agentKeysExist(senderAgentId)) {
 							throw new Error(

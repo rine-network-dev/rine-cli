@@ -1,8 +1,9 @@
 import type { Command } from "commander";
 import { withClient, withErrorHandler } from "../action.js";
-import type { OrgRead } from "../api-types.js";
+import type { AgentRead, ListResponse, OrgRead } from "../api-types.js";
 import {
 	cacheToken,
+	getApiUrl,
 	getCredentialEntry,
 	loadCredentials,
 	loadTokenCache,
@@ -10,8 +11,10 @@ import {
 	saveTokenCache,
 } from "../config.js";
 import { formatError } from "../errors.js";
-import { fetchOAuthToken, getOrRefreshToken } from "../http.js";
+import { HttpClient, fetchOAuthToken, getOrRefreshToken } from "../http.js";
+import { agentKeysExist } from "../crypto/keys.js";
 import { printError, printJson, printSuccess, printTable } from "../output.js";
+import { resolveAgent } from "../resolve-agent.js";
 import { promptPassword, promptText } from "../prompt.js";
 import type { GlobalOpts } from "../types.js";
 
@@ -71,6 +74,102 @@ export function registerAuth(program: Command): void {
 				await showOrgStatus(client, gOpts);
 			}),
 		);
+
+	// rine whoami
+	program
+		.command("whoami")
+		.description("Show current identity and status")
+		.action(async () => {
+			const gOpts = program.opts<GlobalOpts>();
+			const profile = gOpts.profile ?? "default";
+
+			const entry = getCredentialEntry(profile);
+			if (!entry) {
+				if (gOpts.json) {
+					printJson({ logged_in: false });
+				} else {
+					printTable([{ Field: "Status", Value: "not logged in" }]);
+				}
+				return;
+			}
+
+			try {
+				const token = await getOrRefreshToken(entry, profile);
+				const defaultHeaders: Record<string, string> = {};
+				const client = new HttpClient({
+					tokenFn: () => Promise.resolve(token),
+					canRefresh: false,
+					defaultHeaders,
+				});
+
+				const org = (await client.get("/org")) as OrgRead;
+
+				// Try to resolve agent
+				let agentHandle: string | undefined;
+				let agentId: string | undefined;
+				let keysLabel: string | undefined;
+
+				try {
+					agentId = await resolveAgent(client, undefined, gOpts.as);
+					const agents = (
+						await client.get("/agents")
+					) as ListResponse<AgentRead>;
+					const agent = agents.items.find((a) => a.id === agentId);
+					agentHandle = agent?.handle;
+
+					const hasLocal = agentKeysExist(agentId);
+					let hasServer = false;
+					try {
+						await client.get(`/agents/${agentId}/keys`);
+						hasServer = true;
+					} catch {
+						// no server keys
+					}
+					keysLabel =
+						hasLocal && hasServer
+							? "local + server"
+							: hasLocal
+								? "local only"
+								: hasServer
+									? "server only"
+									: "none";
+				} catch {
+					// no agent resolvable — omit agent fields
+				}
+
+				if (gOpts.json) {
+					printJson({
+						profile,
+						api: getApiUrl(),
+						org: { name: org.name, slug: org.slug },
+						trust_tier: org.trust_tier,
+						...(agentId
+							? {
+									agent: agentHandle ?? null,
+									agent_id: agentId,
+									keys: keysLabel,
+								}
+							: {}),
+					});
+				} else {
+					const rows = [
+						{ Field: "Profile", Value: profile },
+						{ Field: "API", Value: getApiUrl() },
+						{ Field: "Org", Value: `${org.name} (${org.slug})` },
+						{ Field: "Trust Tier", Value: String(org.trust_tier) },
+					];
+					if (agentId) {
+						rows.push({ Field: "Agent", Value: agentHandle ?? "-" });
+						rows.push({ Field: "Agent ID", Value: agentId });
+						rows.push({ Field: "Keys", Value: keysLabel ?? "none" });
+					}
+					printTable(rows);
+				}
+			} catch (err) {
+				printError(formatError(err));
+				process.exitCode = 1;
+			}
+		});
 
 	// rine auth (group)
 	const authGroup = program.command("auth").description("Auth commands");

@@ -23,7 +23,7 @@ const program = new Command("rine")
 	.option("--table", "output as table")
 	.option(
 		"--as <agent>",
-		"act as a specific agent (UUID or handle, e.g. bot@org.rine.network)",
+		"act as a specific agent (UUID, handle, or bare name e.g. kofi)",
 	);
 
 registerAuth(program);
