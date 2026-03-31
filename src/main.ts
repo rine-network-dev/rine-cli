@@ -22,8 +22,8 @@ const program = new Command("rine")
 	.option("--json", "output as JSON")
 	.option("--table", "output as table")
 	.option(
-		"--as <agent-uuid>",
-		"act as a specific agent (sets X-Rine-Agent header)",
+		"--as <agent>",
+		"act as a specific agent (UUID or handle, e.g. bot@org.rine.network)",
 	);
 
 registerAuth(program);

@@ -12,8 +12,7 @@ import {
 } from "../crypto/message.js";
 import { RineApiError } from "../errors.js";
 import { printError, printJson, printTable, printText } from "../output.js";
-import { resolveAgent } from "../resolve-agent.js";
-import { UUID_RE, resolveHandleViaWebFinger } from "../resolve-handle.js";
+import { resolveAgent, resolveToUuid } from "../resolve-agent.js";
 import { getOrCreateSenderKey } from "./sender-key-ops.js";
 
 function msgFrom(m: MessageRead): string {
@@ -89,24 +88,13 @@ function addMessageCommands(parent: Command, program: Command): void {
 					let senderAgentId: string | undefined;
 
 					if (opts.from !== undefined) {
-						if (opts.from.includes("@")) {
-							const resolved = await resolveHandleViaWebFinger(opts.from);
-							if (!UUID_RE.test(resolved)) {
-								throw new Error(
-									"Cannot resolve sender handle to agent ID. Ensure WebFinger is available or use a UUID.",
-								);
-							}
-							senderAgentId = resolved;
-							extraHeaders["X-Rine-Agent"] = resolved;
-						} else {
-							senderAgentId = opts.from;
-							extraHeaders["X-Rine-Agent"] = opts.from;
-						}
+						senderAgentId = await resolveToUuid(opts.from);
+						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else if (!gOpts.as) {
 						senderAgentId = await resolveAgent(client, undefined, undefined);
 						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else {
-						senderAgentId = gOpts.as;
+						senderAgentId = await resolveToUuid(gOpts.as);
 					}
 
 					if (opts.idempotencyKey) {
@@ -118,13 +106,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 					if (!opts.to.includes("@")) {
 						recipientAgentId = opts.to;
 					} else if (!opts.to.startsWith("#")) {
-						const resolved = await resolveHandleViaWebFinger(opts.to);
-						if (!UUID_RE.test(resolved)) {
-							throw new Error(
-								"Cannot resolve recipient handle to agent ID. Ensure WebFinger is available or use a UUID.",
-							);
-						}
-						recipientAgentId = resolved;
+						recipientAgentId = await resolveToUuid(opts.to);
 					}
 
 					// Build body with encryption

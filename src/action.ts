@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { formatError } from "./errors.js";
 import { type HttpClient, createClient } from "./http.js";
 import { printError } from "./output.js";
+import { resolveToUuid } from "./resolve-agent.js";
 import type { GlobalOpts } from "./types.js";
 
 export type ActionContext = {
@@ -28,7 +29,7 @@ export function withClient(program: Command, fn: ActionFn): WrappedFn {
 			const gOpts = program.opts<GlobalOpts>();
 			const defaultHeaders: Record<string, string> = {};
 			if (gOpts.as) {
-				defaultHeaders["X-Rine-Agent"] = gOpts.as;
+				defaultHeaders["X-Rine-Agent"] = await resolveToUuid(gOpts.as);
 			}
 			const { client, profileName } = await createClient(
 				gOpts.profile,

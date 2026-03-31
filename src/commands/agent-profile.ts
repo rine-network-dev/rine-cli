@@ -146,11 +146,11 @@ export function registerAgentProfile(program: Command): void {
 						const skill: Record<string, unknown> = {
 							id: opts.skillId,
 							name: opts.skillName,
+							description: opts.skillDescription ?? "",
+							tags: opts.tags
+								? opts.tags.split(",").map((t) => t.trim())
+								: [],
 						};
-						if (opts.skillDescription)
-							skill.description = opts.skillDescription;
-						if (opts.tags)
-							skill.tags = opts.tags.split(",").map((t) => t.trim());
 						if (opts.examples)
 							skill.examples = opts.examples.split(",").map((e) => e.trim());
 						if (opts.inputModes)

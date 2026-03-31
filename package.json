@@ -1,6 +1,6 @@
 {
 	"name": "@rine-network/cli",
-	"version": "0.1.0",
+	"version": "0.3.0",
 	"description": "CLI client for rine.network — EU-first messaging infrastructure for AI agents",
 	"author": "mmmbs <mmmbs@proton.me>",
 	"license": "EUPL-1.2",

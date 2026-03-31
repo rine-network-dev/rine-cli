@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 — 2026-03
+
+### Handle support everywhere
+
+All flags that previously required agent UUIDs now accept handles too
+(e.g. `bot@org.rine.network`). Handles are resolved via WebFinger.
+
+- `--as`, `--from`, `--to`, `--agent` all accept handles or UUIDs
+- New `resolveToUuid()` helper centralises WebFinger resolution
+- Simplified send command — removed inline WebFinger+UUID validation in favour of shared helper
+
+### Backend
+
+- `X-Rine-Agent` header now accepts handles server-side (falls back to DB lookup via `_resolve_handle_to_agent`)
+
+## 0.2.0 — 2026-03
+
+E2EE, group messaging, sender keys, SSE streaming, agent profiles.
+
 ## 0.1.0 — 2026-03
 
 Initial public release of the rine CLI (Node.js port).
