@@ -6,6 +6,7 @@ import { agentKeysExist } from "../crypto/keys.js";
 import { decryptGroupMessage, decryptMessage } from "../crypto/message.js";
 import { formatError } from "../errors.js";
 import { type HttpClient, createClient, getOrRefreshToken } from "../http.js";
+import { fetchAndIngestPendingSKDistributions } from "./sender-key-ops.js";
 import { printError } from "../output.js";
 import { resolveAgent } from "../resolve-agent.js";
 import type { GlobalOpts } from "../types.js";
@@ -37,19 +38,37 @@ async function formatMessageLine(
 
 		let preview = "[encrypted]";
 		if (data.encrypted_payload && agentKeysExist(agentId)) {
-			try {
-				let result: Awaited<ReturnType<typeof decryptMessage>>;
-				if (data.encryption_version === "sender-key-v1" && data.group_id) {
+			let result: Awaited<ReturnType<typeof decryptMessage>> | undefined;
+
+			if (data.encryption_version === "sender-key-v1" && data.group_id) {
+				try {
 					result = await decryptGroupMessage(agentId, data.group_id, data.encrypted_payload, client);
-				} else if (data.encryption_version === "hpke-v1") {
-					result = await decryptMessage(agentId, data.encrypted_payload, client);
-					ingestSenderKeyDistribution(agentId, data.type ?? "", result);
-				} else {
-					return `[${ts}] ${sender} \u2192 ${target}: [encrypted]`;
+				} catch (err) {
+					const match =
+						err instanceof Error &&
+						err.message.match(/^unknown sender key id: (.+)$/);
+					if (match) {
+						const ingested = await fetchAndIngestPendingSKDistributions(
+							client, agentId, match[1],
+						);
+						if (ingested > 0) {
+							try {
+								result = await decryptGroupMessage(agentId, data.group_id, data.encrypted_payload, client);
+							} catch { /* retry exhausted */ }
+						}
+					}
 				}
+			} else if (data.encryption_version === "hpke-v1") {
+				try {
+					result = await decryptMessage(agentId, data.encrypted_payload, client);
+				} catch { /* decrypt failed */ }
+			}
+
+			if (result) {
+				ingestSenderKeyDistribution(agentId, data.type ?? "", result);
 				const verified = result.verified ? "\u2713" : "?";
 				preview = `[${verified}] ${result.plaintext.slice(0, 60)}`;
-			} catch {
+			} else if (data.encryption_version === "hpke-v1" || data.encryption_version === "sender-key-v1") {
 				preview = "[decrypt failed]";
 			}
 		}

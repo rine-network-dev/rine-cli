@@ -13,7 +13,10 @@ import {
 import { RineApiError } from "../errors.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import { resolveAgent, resolveToUuid } from "../resolve-agent.js";
-import { getOrCreateSenderKey } from "./sender-key-ops.js";
+import {
+	fetchAndIngestPendingSKDistributions,
+	getOrCreateSenderKey,
+} from "./sender-key-ops.js";
 
 function msgFrom(m: MessageRead): string {
 	return m.sender_handle ?? m.from_agent_id ?? "";
@@ -198,27 +201,74 @@ function addMessageCommands(parent: Command, program: Command): void {
 						agentKeysExist(agentId);
 
 					if (canDecrypt) {
-						try {
-							let result: Awaited<ReturnType<typeof decryptMessage>>;
-							if (
-								data.encryption_version === "sender-key-v1" &&
-								data.group_id
-							) {
+						let result: Awaited<ReturnType<typeof decryptMessage>> | undefined;
+
+						if (
+							data.encryption_version === "sender-key-v1" &&
+							data.group_id
+						) {
+							try {
 								result = await decryptGroupMessage(
 									agentId,
 									data.group_id,
 									data.encrypted_payload,
 									client,
 								);
-							} else {
+							} catch (err) {
+								// Auto-recover: fetch missing sender keys and retry once
+								const match =
+									err instanceof Error &&
+									err.message.match(/^unknown sender key id: (.+)$/);
+								if (match) {
+									const ingested =
+										await fetchAndIngestPendingSKDistributions(
+											client,
+											agentId,
+											match[1],
+										);
+									if (ingested > 0) {
+										try {
+											result = await decryptGroupMessage(
+												agentId,
+												data.group_id,
+												data.encrypted_payload,
+												client,
+											);
+										} catch (retryErr) {
+											if (!gOpts.json) {
+												printError(
+													`Decryption failed after auto-ingest: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+												);
+											}
+										}
+									} else if (!gOpts.json) {
+										printError(
+											`Decryption failed: ${err.message}`,
+										);
+									}
+								} else if (!gOpts.json) {
+									printError(
+										`Decryption failed: ${err instanceof Error ? err.message : String(err)}`,
+									);
+								}
+							}
+						} else {
+							try {
 								result = await decryptMessage(
 									agentId,
 									data.encrypted_payload,
 									client,
 								);
+							} catch (err) {
+								if (!gOpts.json) {
+									printError(
+										`Decryption failed: ${err instanceof Error ? err.message : String(err)}`,
+									);
+								}
 							}
+						}
 
-							// Auto-ingest sender key distributions (only from verified senders)
+						if (result) {
 							if (ingestSenderKeyDistribution(agentId, data.type, result)) {
 								printText("Sender key ingested");
 							}
@@ -247,12 +297,6 @@ function addMessageCommands(parent: Command, program: Command): void {
 								]);
 							}
 							return;
-						} catch (err) {
-							if (!gOpts.json) {
-								printError(
-									`Decryption failed: ${err instanceof Error ? err.message : String(err)}`,
-								);
-							}
 						}
 					}
 
