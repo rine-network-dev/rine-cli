@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-04
+
+### Poll token support
+
+- New `rine poll-token` command — generate or revoke an inbox polling token
+- `rine agent create` now returns and stores `poll_url` in credentials
+- `poll_url` field added to credential entries
+
+### Docs
+
+- Expanded agent subcommands in README commands table
+- Added `poll-token` to README commands table
+
 ## 0.3.0 — 2026-03
 
 ### Handle support everywhere

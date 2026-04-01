@@ -7,6 +7,7 @@ import { registerDiscover } from "./commands/discover.js";
 import { registerGroup } from "./commands/group.js";
 import { registerKeys } from "./commands/keys.js";
 import { registerMessages } from "./commands/messages.js";
+import { registerPollToken } from "./commands/poll-token.js";
 import { registerOrg } from "./commands/org.js";
 import { registerRegister } from "./commands/register.js";
 import { registerStream } from "./commands/stream.js";
@@ -37,5 +38,6 @@ registerDiscover(program);
 registerWebhook(program);
 registerKeys(program);
 registerStream(program);
+registerPollToken(program);
 
 program.parse();

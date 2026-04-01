@@ -4,6 +4,7 @@ export type Credentials = Record<string, CredentialEntry>;
 export interface CredentialEntry {
 	client_id: string;
 	client_secret: string;
+	poll_url?: string;
 }
 
 export interface CachedToken {

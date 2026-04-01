@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
 import type { AgentRead, ListResponse } from "../api-types.js";
+import { loadCredentials, saveCredentials } from "../config.js";
 import {
 	encryptionPublicKeyToJWK,
 	generateAgentKeys,
@@ -91,9 +92,21 @@ export function registerAgent(program: Command): void {
 						body.human_oversight = opts.humanOversight;
 					}
 					if (opts.unlisted) body.unlisted = true;
-					const data = (await client.post("/agents", body)) as AgentRead;
+					const data = (await client.post("/agents", body)) as AgentRead & {
+						poll_url?: string;
+					};
 
 					saveAgentKeys(data.id, agentKeys);
+
+					// Store poll_url in credentials if returned
+					if (data.poll_url) {
+						const profile = gOpts.profile ?? "default";
+						const creds = loadCredentials();
+						if (creds[profile]) {
+							creds[profile].poll_url = data.poll_url;
+							saveCredentials(creds);
+						}
+					}
 
 					if (gOpts.json) {
 						printJson(data);
@@ -110,6 +123,9 @@ export function registerAgent(program: Command): void {
 						console.log("E2EE keys generated and stored locally.");
 						if (data.verification_words) {
 							console.log(`Verification words: ${data.verification_words}`);
+						}
+						if (data.poll_url) {
+							console.log(`Poll URL: ${data.poll_url}`);
 						}
 					}
 				},
