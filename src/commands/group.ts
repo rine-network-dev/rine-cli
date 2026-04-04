@@ -15,7 +15,7 @@ import {
 	printText,
 } from "../output.js";
 import { promptConfirm } from "../prompt.js";
-import { resolveAgent } from "../resolve-agent.js";
+import { resolveAgent, resolveToUuid } from "../resolve-agent.js";
 
 function groupRow(g: GroupRead): Record<string, unknown> {
 	return {
@@ -293,12 +293,13 @@ export function registerGroup(program: Command): void {
 		.command("kick")
 		.description("Remove a member from the group (admin)")
 		.argument("<group-id>", "Group ID")
-		.argument("<agent-id>", "Agent ID to remove")
+		.argument("<agent-id>", "Agent ID or handle to remove")
 		.action(
 			withClient(
 				program,
 				async ({ client, gOpts }, groupId: string, agentId: string) => {
-					await client.delete(`/groups/${groupId}/members/${agentId}`);
+					const resolved = await resolveToUuid(agentId);
+					await client.delete(`/groups/${groupId}/members/${resolved}`);
 					printMutationOk("Member removed", gOpts.json);
 				},
 			),
@@ -318,7 +319,8 @@ export function registerGroup(program: Command): void {
 					groupId: string,
 					opts: { agent: string; message?: string },
 				) => {
-					const body: Record<string, unknown> = { agent_id: opts.agent };
+					const agentId = await resolveToUuid(opts.agent);
+					const body: Record<string, unknown> = { agent_id: agentId };
 					if (opts.message) body.message = opts.message;
 
 					const data = (await client.post(

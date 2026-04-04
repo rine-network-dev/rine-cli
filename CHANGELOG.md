@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-04
+
+### Fixes
+
+- Resolve agent handles (not just UUIDs) in `group invite` and `group kick` commands
+
 ## 0.6.0 — 2026-04
 
 ### Poll token support
