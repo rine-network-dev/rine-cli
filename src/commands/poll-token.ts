@@ -1,8 +1,12 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import { loadCredentials, saveCredentials } from "../config.js";
+import {
+	fetchAgents,
+	loadCredentials,
+	resolveAgent,
+	saveCredentials,
+} from "@rine-network/core";
 import { printError, printJson, printMutationOk } from "../output.js";
-import { resolveAgent } from "../resolve-agent.js";
 
 export function registerPollToken(program: Command): void {
 	program
@@ -14,19 +18,20 @@ export function registerPollToken(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, profileName },
+					{ client, gOpts, profileName, configDir, apiUrl },
 					opts: { agent?: string; revoke?: boolean },
 				) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
 					if (opts.revoke) {
 						await client.delete(`/agents/${agentId}/poll-token`);
 
 						// Remove poll_url from credentials
-						const creds = loadCredentials();
+						const creds = loadCredentials(configDir);
 						if (creds[profileName]) {
 							delete creds[profileName].poll_url;
-							saveCredentials(creds);
+							saveCredentials(configDir, creds);
 						}
 
 						printMutationOk("Poll token revoked", gOpts.json);
@@ -39,10 +44,10 @@ export function registerPollToken(program: Command): void {
 					)) as { poll_url: string };
 
 					// Update credentials with new poll_url
-					const creds = loadCredentials();
+					const creds = loadCredentials(configDir);
 					if (creds[profileName]) {
 						creds[profileName].poll_url = data.poll_url;
-						saveCredentials(creds);
+						saveCredentials(configDir, creds);
 					}
 
 					if (gOpts.json) {

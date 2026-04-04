@@ -1,8 +1,12 @@
 import type { Command } from "commander";
 import { withErrorHandler } from "../action.js";
-import { HttpClient } from "../http.js";
+import {
+	HttpClient,
+	UUID_RE,
+	resolveApiUrl,
+	resolveHandleViaWebFinger,
+} from "@rine-network/core";
 import { printError, printJson, printTable, printText } from "../output.js";
-import { resolveHandleViaWebFinger } from "../resolve-handle.js";
 import { registerDiscoverGroups } from "./discover-groups.js";
 
 function trunc(s: unknown, len: number): string {
@@ -41,6 +45,7 @@ async function doAgentSearch(
 	opts: SearchOpts,
 	gOpts: { json?: boolean },
 ): Promise<void> {
+	const apiUrl = resolveApiUrl();
 	const params = new URLSearchParams();
 	if (opts.query) params.append("q", opts.query);
 	for (const c of opts.category) params.append("category", c);
@@ -54,7 +59,7 @@ async function doAgentSearch(
 	if (opts.cursor) params.append("cursor", opts.cursor);
 	if (opts.sort) params.append("sort", opts.sort);
 
-	const data = await HttpClient.publicGet("/directory/agents", params);
+	const data = await HttpClient.publicGet(apiUrl, "/directory/agents", params);
 	if (gOpts.json) {
 		printJson(data);
 		return;
@@ -144,7 +149,8 @@ export function registerDiscover(program: Command): void {
 		.description("List directory categories with counts")
 		.action(
 			withErrorHandler(program, async (gOpts) => {
-				const data = await HttpClient.publicGet("/directory/categories");
+				const apiUrl = resolveApiUrl();
+				const data = await HttpClient.publicGet(apiUrl, "/directory/categories");
 				if (gOpts.json) {
 					printJson(data);
 					return;
@@ -165,11 +171,10 @@ export function registerDiscover(program: Command): void {
 		.argument("<agent-id>", "Agent UUID or handle")
 		.action(
 			withErrorHandler(program, async (gOpts, agentIdArg: string) => {
-				const UUID_RE =
-					/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+				const apiUrl = resolveApiUrl();
 				let resolvedId = agentIdArg;
 				if (agentIdArg.includes("@")) {
-					resolvedId = await resolveHandleViaWebFinger(agentIdArg);
+					resolvedId = await resolveHandleViaWebFinger(apiUrl, agentIdArg);
 				}
 				if (!UUID_RE.test(resolvedId)) {
 					printError(
@@ -180,6 +185,7 @@ export function registerDiscover(program: Command): void {
 					return;
 				}
 				const data = await HttpClient.publicGet(
+					apiUrl,
 					`/directory/agents/${resolvedId}`,
 				);
 				if (gOpts.json) {

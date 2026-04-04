@@ -1,20 +1,26 @@
 import type { Command } from "commander";
 import { withClient, withErrorHandler } from "../action.js";
-import type { AgentRead, ListResponse, OrgRead } from "../api-types.js";
 import {
+	type AgentRead,
+	type ListResponse,
+	type OrgRead,
+	HttpClient,
+	agentKeysExist,
 	cacheToken,
-	getApiUrl,
+	fetchAgents,
+	fetchOAuthToken,
+	formatError,
 	getCredentialEntry,
+	getOrRefreshToken,
 	loadCredentials,
 	loadTokenCache,
+	resolveAgent,
+	resolveApiUrl,
+	resolveConfigDir,
 	saveCredentials,
 	saveTokenCache,
-} from "../config.js";
-import { formatError } from "../errors.js";
-import { HttpClient, fetchOAuthToken, getOrRefreshToken } from "../http.js";
-import { agentKeysExist } from "../crypto/keys.js";
+} from "@rine-network/core";
 import { printError, printJson, printSuccess, printTable } from "../output.js";
-import { resolveAgent } from "../resolve-agent.js";
 import { promptPassword, promptText } from "../prompt.js";
 import type { GlobalOpts } from "../types.js";
 
@@ -30,17 +36,19 @@ export function registerAuth(program: Command): void {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
 				const profile = gOpts.profile ?? "default";
+				const configDir = resolveConfigDir();
+				const apiUrl = resolveApiUrl();
 				const clientId = opts.clientId ?? (await promptText("Client ID: "));
 				const clientSecret =
 					opts.clientSecret ?? (await promptPassword("Client secret: "));
 
-				const tokenData = await fetchOAuthToken(clientId, clientSecret);
+				const tokenData = await fetchOAuthToken(apiUrl, clientId, clientSecret);
 
-				const creds = loadCredentials();
+				const creds = loadCredentials(configDir);
 				creds[profile] = { client_id: clientId, client_secret: clientSecret };
-				saveCredentials(creds);
+				saveCredentials(configDir, creds);
 
-				cacheToken(profile, tokenData);
+				cacheToken(configDir, profile, tokenData);
 
 				printSuccess(`Logged in as ${clientId}`);
 			} catch (err) {
@@ -56,9 +64,10 @@ export function registerAuth(program: Command): void {
 		.action(
 			withErrorHandler(program, (gOpts) => {
 				const profile = gOpts.profile ?? "default";
-				const cache = loadTokenCache();
+				const configDir = resolveConfigDir();
+				const cache = loadTokenCache(configDir);
 				delete cache[profile];
-				saveTokenCache(cache);
+				saveTokenCache(configDir, cache);
 				printSuccess(
 					`Logged out — token cache cleared for profile '${profile}'. Credentials preserved.`,
 				);
@@ -82,8 +91,10 @@ export function registerAuth(program: Command): void {
 		.action(async () => {
 			const gOpts = program.opts<GlobalOpts>();
 			const profile = gOpts.profile ?? "default";
+			const configDir = resolveConfigDir();
+			const apiUrl = resolveApiUrl();
 
-			const entry = getCredentialEntry(profile);
+			const entry = getCredentialEntry(configDir, profile);
 			if (!entry) {
 				if (gOpts.json) {
 					printJson({ logged_in: false });
@@ -94,10 +105,11 @@ export function registerAuth(program: Command): void {
 			}
 
 			try {
-				const token = await getOrRefreshToken(entry, profile);
+				const token = await getOrRefreshToken(configDir, apiUrl, entry, profile);
 				const defaultHeaders: Record<string, string> = {};
 				const client = new HttpClient({
 					tokenFn: () => Promise.resolve(token),
+					apiUrl,
 					canRefresh: false,
 					defaultHeaders,
 				});
@@ -110,14 +122,12 @@ export function registerAuth(program: Command): void {
 				let keysLabel: string | undefined;
 
 				try {
-					agentId = await resolveAgent(client, undefined, gOpts.as);
-					const agents = (
-						await client.get("/agents")
-					) as ListResponse<AgentRead>;
-					const agent = agents.items.find((a) => a.id === agentId);
+					const agents = await fetchAgents(client);
+					agentId = await resolveAgent(apiUrl, agents, undefined, gOpts.as);
+					const agent = agents.find((a) => a.id === agentId);
 					agentHandle = agent?.handle;
 
-					const hasLocal = agentKeysExist(agentId);
+					const hasLocal = agentKeysExist(configDir, agentId);
 					let hasServer = false;
 					try {
 						await client.get(`/agents/${agentId}/keys`);
@@ -140,7 +150,7 @@ export function registerAuth(program: Command): void {
 				if (gOpts.json) {
 					printJson({
 						profile,
-						api: getApiUrl(),
+						api: apiUrl,
 						org: { name: org.name, slug: org.slug },
 						trust_tier: org.trust_tier,
 						...(agentId
@@ -154,7 +164,7 @@ export function registerAuth(program: Command): void {
 				} else {
 					const rows = [
 						{ Field: "Profile", Value: profile },
-						{ Field: "API", Value: getApiUrl() },
+						{ Field: "API", Value: apiUrl },
 						{ Field: "Org", Value: `${org.name} (${org.slug})` },
 						{ Field: "Trust Tier", Value: String(org.trust_tier) },
 					];
@@ -182,10 +192,12 @@ export function registerAuth(program: Command): void {
 			withErrorHandler(program, async (gOpts, opts: { force?: boolean }) => {
 				const profile = gOpts.profile ?? "default";
 				const force = opts.force === true;
+				const configDir = resolveConfigDir();
+				const apiUrl = resolveApiUrl();
 
 				const now = Date.now() / 1000;
 				const envToken = process.env.RINE_TOKEN;
-				const cache = loadTokenCache();
+				const cache = loadTokenCache(configDir);
 				const cached = cache[profile];
 				const source: "cache" | "server" =
 					envToken !== undefined ||
@@ -193,8 +205,11 @@ export function registerAuth(program: Command): void {
 						? "cache"
 						: "server";
 
-				const entry = getCredentialEntry(profile);
-				const token = await getOrRefreshToken(entry, profile, force);
+				const entry = getCredentialEntry(configDir, profile);
+				const token = await getOrRefreshToken(configDir, apiUrl, entry, profile, {
+					force,
+					envToken,
+				});
 
 				if (gOpts.json) {
 					printJson({ access_token: token, source });

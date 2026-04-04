@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import type { OrgRead } from "../api-types.js";
+import type { OrgRead } from "@rine-network/core";
 import {
 	printError,
 	printJson,

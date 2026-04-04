@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { withClient, withErrorHandler } from "../src/action.js";
-import { RineApiError } from "../src/errors.js";
-import * as http from "../src/http.js";
+import { RineApiError } from "@rine-network/core";
+import * as core from "@rine-network/core";
 import * as output from "../src/output.js";
 
 // Suppress console output during tests
@@ -23,14 +23,17 @@ function makeProgram(opts: Record<string, unknown> = {}): Command {
 }
 
 describe("withClient", () => {
-	it("calls fn with client and gOpts", async () => {
-		const mockClient = { get: vi.fn() };
-		vi.spyOn(http, "createClient").mockResolvedValue({
-			client: mockClient as never,
-			profileName: "default",
-			entry: undefined,
+	beforeEach(() => {
+		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
+		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
+		vi.spyOn(core, "getCredentialEntry").mockReturnValue({
+			client_id: "test-id",
+			client_secret: "test-secret",
 		});
+		vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
+	});
 
+	it("calls fn with client and gOpts", async () => {
 		const fn = vi.fn();
 		const program = makeProgram({ profile: "test" });
 		const wrapped = withClient(program, fn);
@@ -38,15 +41,17 @@ describe("withClient", () => {
 
 		expect(fn).toHaveBeenCalledTimes(1);
 		const ctx = fn.mock.calls[0]![0];
-		expect(ctx.client).toBe(mockClient);
+		expect(ctx.client).toBeDefined();
 		expect(ctx.gOpts).toEqual({ profile: "test" });
-		expect(ctx.profileName).toBe("default");
+		expect(ctx.profileName).toBe("test");
+		expect(ctx.configDir).toBe("/tmp/test-rine");
+		expect(ctx.apiUrl).toBe("https://test.rine.network");
 	});
 
 	it("catches errors and sets exitCode", async () => {
-		vi.spyOn(http, "createClient").mockRejectedValue(
-			new RineApiError(401, "Unauthorized"),
-		);
+		vi.spyOn(core, "resolveConfigDir").mockImplementation(() => {
+			throw new RineApiError(401, "Unauthorized");
+		});
 		const printErrorSpy = vi.spyOn(output, "printError");
 
 		const fn = vi.fn();
@@ -60,11 +65,6 @@ describe("withClient", () => {
 	});
 
 	it("catches errors thrown inside fn", async () => {
-		vi.spyOn(http, "createClient").mockResolvedValue({
-			client: {} as never,
-			profileName: "default",
-			entry: undefined,
-		});
 		const printErrorSpy = vi.spyOn(output, "printError");
 
 		const fn = vi.fn().mockRejectedValue(new Error("boom"));
@@ -77,12 +77,6 @@ describe("withClient", () => {
 	});
 
 	it("forwards positional args from commander", async () => {
-		vi.spyOn(http, "createClient").mockResolvedValue({
-			client: {} as never,
-			profileName: "default",
-			entry: undefined,
-		});
-
 		const fn = vi.fn();
 		const program = makeProgram({});
 		const wrapped = withClient(program, fn);

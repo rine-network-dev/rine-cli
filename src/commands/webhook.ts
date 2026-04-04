@@ -1,10 +1,12 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import type {
-	ListResponse,
-	WebhookDeliveryRead,
-	WebhookRead,
-} from "../api-types.js";
+import {
+	type ListResponse,
+	type WebhookDeliveryRead,
+	type WebhookRead,
+	fetchAgents,
+	resolveAgent,
+} from "@rine-network/core";
 import {
 	printError,
 	printJson,
@@ -12,7 +14,6 @@ import {
 	printTable,
 } from "../output.js";
 import { promptConfirm } from "../prompt.js";
-import { resolveAgent } from "../resolve-agent.js";
 
 export function registerWebhook(program: Command): void {
 	const webhook = program.command("webhook").description("Manage webhooks");
@@ -25,13 +26,14 @@ export function registerWebhook(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, opts: { agent?: string; url: string }) => {
+				async ({ client, gOpts, apiUrl }, opts: { agent?: string; url: string }) => {
 					if (!opts.url.startsWith("https://")) {
 						printError("Webhook URL must start with https://");
 						process.exitCode = 2;
 						return;
 					}
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 					const data = (await client.post("/webhooks", {
 						agent_id: agentId,
 						url: opts.url,

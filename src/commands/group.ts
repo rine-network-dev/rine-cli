@@ -1,12 +1,15 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import type {
-	GroupMemberRead,
-	GroupRead,
-	JoinRequestRead,
-	ListResponse,
-	VoteResponse,
-} from "../api-types.js";
+import {
+	type GroupMemberRead,
+	type GroupRead,
+	type JoinRequestRead,
+	type ListResponse,
+	type VoteResponse,
+	fetchAgents,
+	resolveAgent,
+	resolveToUuid,
+} from "@rine-network/core";
 import {
 	printError,
 	printJson,
@@ -15,7 +18,6 @@ import {
 	printText,
 } from "../output.js";
 import { promptConfirm } from "../prompt.js";
-import { resolveAgent, resolveToUuid } from "../resolve-agent.js";
 
 function groupRow(g: GroupRead): Record<string, unknown> {
 	return {
@@ -278,11 +280,12 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, apiUrl },
 					groupId: string,
 					opts: { agent?: string },
 				) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 					await client.delete(`/groups/${groupId}/members/${agentId}`);
 					printMutationOk("Left group", gOpts.json);
 				},
@@ -297,8 +300,8 @@ export function registerGroup(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, groupId: string, agentId: string) => {
-					const resolved = await resolveToUuid(agentId);
+				async ({ client, gOpts, apiUrl }, groupId: string, agentId: string) => {
+					const resolved = await resolveToUuid(apiUrl, agentId);
 					await client.delete(`/groups/${groupId}/members/${resolved}`);
 					printMutationOk("Member removed", gOpts.json);
 				},
@@ -315,11 +318,11 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, apiUrl },
 					groupId: string,
 					opts: { agent: string; message?: string },
 				) => {
-					const agentId = await resolveToUuid(opts.agent);
+					const agentId = await resolveToUuid(apiUrl, opts.agent);
 					const body: Record<string, unknown> = { agent_id: agentId };
 					if (opts.message) body.message = opts.message;
 

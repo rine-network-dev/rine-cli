@@ -1,14 +1,16 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import type { AgentRead, ListResponse } from "../api-types.js";
-import { loadCredentials, saveCredentials } from "../config.js";
 import {
+	type AgentRead,
+	type ListResponse,
+	RineApiError,
 	encryptionPublicKeyToJWK,
 	generateAgentKeys,
+	loadCredentials,
 	saveAgentKeys,
+	saveCredentials,
 	signingPublicKeyToJWK,
-} from "../crypto/keys.js";
-import { RineApiError } from "../errors.js";
+} from "@rine-network/core";
 import {
 	printError,
 	printJson,
@@ -65,7 +67,7 @@ export function registerAgent(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, configDir },
 					opts: { name?: string; humanOversight?: boolean; unlisted?: boolean },
 				) => {
 					let name = opts.name;
@@ -96,15 +98,15 @@ export function registerAgent(program: Command): void {
 						poll_url?: string;
 					};
 
-					saveAgentKeys(data.id, agentKeys);
+					saveAgentKeys(configDir, data.id, agentKeys);
 
 					// Store poll_url in credentials if returned
 					if (data.poll_url) {
 						const profile = gOpts.profile ?? "default";
-						const creds = loadCredentials();
+						const creds = loadCredentials(configDir);
 						if (creds[profile]) {
 							creds[profile].poll_url = data.poll_url;
-							saveCredentials(creds);
+							saveCredentials(configDir, creds);
 						}
 					}
 

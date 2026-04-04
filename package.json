@@ -1,64 +1,62 @@
 {
-	"name": "@rine-network/cli",
-	"version": "0.6.1",
-	"description": "CLI client for rine.network — EU-first messaging infrastructure for AI agents",
-	"author": "mmmbs <mmmbs@proton.me>",
-	"license": "EUPL-1.2",
-	"type": "module",
-	"engines": {
-		"node": ">=22"
-	},
-	"bin": {
-		"rine": "bin/rine.js"
-	},
-	"files": [
-		"bin/",
-		"dist/"
-	],
-	"exports": {
-		".": "./dist/main.js"
-	},
-	"scripts": {
-		"build": "tsdown src/main.ts --format esm --outDir dist --clean",
-		"prepublishOnly": "npm run build",
-		"typecheck": "tsc --noEmit",
-		"lint": "biome check .",
-		"test": "vitest run",
-		"test:coverage": "vitest --coverage",
-		"dev": "tsx src/main.ts"
-	},
-	"dependencies": {
-		"@hpke/core": "^1.9.0",
-		"@hpke/dhkem-x25519": "^1.8.0",
-		"@noble/curves": "^2.0.1",
-		"@noble/hashes": "^2.0.1",
-		"commander": "^12.0.0",
-		"eventsource-client": "^1.1.0"
-	},
-	"devDependencies": {
-		"@biomejs/biome": "^1.9.0",
-		"@types/node": "^22.0.0",
-		"tsdown": "^0.12.0",
-		"tsx": "^4.19.0",
-		"typescript": "^5.8.0",
-		"vitest": "^3.0.0"
-	},
-	"homepage": "https://rine.network",
-	"repository": {
-		"type": "git",
-		"url": "https://codeberg.org/rine/rine-cli"
-	},
-	"bugs": {
-		"url": "https://codeberg.org/rine/rine-cli/issues"
-	},
-	"publishConfig": {
-		"access": "public"
-	},
-	"keywords": [
-		"messaging",
-		"ai-agents",
-		"cli",
-		"a2a",
-		"eu"
-	]
+  "name": "@rine-network/cli",
+  "version": "0.6.1",
+  "description": "CLI client for rine.network \u2014 EU-first messaging infrastructure for AI agents",
+  "author": "mmmbs <mmmbs@proton.me>",
+  "license": "EUPL-1.2",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "rine": "bin/rine.js"
+  },
+  "files": [
+    "bin/",
+    "dist/"
+  ],
+  "exports": {
+    ".": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsdown src/main.ts --format esm --outDir dist --clean",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "test:coverage": "vitest --coverage",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@rine-network/core": "^0.1.0",
+    "commander": "^12.0.0",
+    "eventsource-client": "^1.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/node": "^22.0.0",
+    "tsdown": "^0.12.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "homepage": "https://rine.network",
+  "repository": {
+    "type": "git",
+    "url": "https://codeberg.org/rine/rine-cli"
+  },
+  "bugs": {
+    "url": "https://codeberg.org/rine/rine-cli/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "messaging",
+    "ai-agents",
+    "cli",
+    "a2a",
+    "eu"
+  ]
 }

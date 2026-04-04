@@ -2,13 +2,14 @@ import type { Command } from "commander";
 import { withErrorHandler } from "../action.js";
 import {
 	cacheToken,
-	getApiUrl,
+	fetchOAuthToken,
 	loadCredentials,
+	resolveApiUrl,
+	resolveConfigDir,
 	saveCredentials,
-} from "../config.js";
-import { fetchOAuthToken } from "../http.js";
+	solveTimeLockWithProgress,
+} from "@rine-network/core";
 import { printError, printJson, printSuccess } from "../output.js";
-import { solveTimeLockWithProgress } from "../timelock.js";
 
 interface ChallengeResponse {
 	challenge_id: string;
@@ -37,7 +38,8 @@ export function registerRegister(program: Command): void {
 				program,
 				async (gOpts, opts: { email: string; name: string; slug: string }) => {
 					const profile = gOpts.profile ?? "default";
-					const apiUrl = getApiUrl();
+					const configDir = resolveConfigDir();
+					const apiUrl = resolveApiUrl();
 
 					// Step 1: POST /auth/register → get PoW challenge
 					const challengeRes = await fetch(`${apiUrl}/auth/register`, {
@@ -128,20 +130,21 @@ export function registerRegister(program: Command): void {
 					const data = (await solveRes.json()) as RegisterSolveResponse;
 
 					// Step 5: Save credentials (flat format)
-					const creds = loadCredentials();
+					const creds = loadCredentials(configDir);
 					creds[profile] = {
 						client_id: data.client_id,
 						client_secret: data.client_secret,
 					};
-					saveCredentials(creds);
+					saveCredentials(configDir, creds);
 
 					// Step 6: Cache initial token (non-fatal)
 					try {
 						const tokenData = await fetchOAuthToken(
+							apiUrl,
 							data.client_id,
 							data.client_secret,
 						);
-						cacheToken(profile, tokenData);
+						cacheToken(configDir, profile, tokenData);
 					} catch {
 						process.stderr.write("Warning: initial token cache failed\n");
 					}

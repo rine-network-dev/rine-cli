@@ -3,20 +3,23 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { withClient, withErrorHandler } from "../action.js";
-import type { AgentKeysResponse, AgentRead, ListResponse } from "../api-types.js";
-import { getConfigDir } from "../config.js";
 import {
+	type AgentKeysResponse,
+	type AgentRead,
+	type ListResponse,
+	RineApiError,
 	agentKeysExist,
+	fetchAgents,
 	fromBase64Url,
 	generateAgentKeys,
+	getAgentPublicKeys,
 	loadAgentKeys,
+	resolveAgent,
+	resolveConfigDir,
 	saveAgentKeys,
 	toBase64Url,
-} from "../crypto/keys.js";
-import { getAgentPublicKeys } from "../crypto/message.js";
-import { RineApiError } from "../errors.js";
+} from "@rine-network/core";
 import { printError, printJson, printMutationOk, printTable } from "../output.js";
-import { resolveAgent } from "../resolve-agent.js";
 
 interface KeyExport {
 	agent_id: string;
@@ -24,12 +27,12 @@ interface KeyExport {
 	encryption_private_key: string;
 }
 
-function getKeysDir(agentId: string): string {
-	return join(getConfigDir(), "keys", agentId);
+function getKeysDir(configDir: string, agentId: string): string {
+	return join(configDir, "keys", agentId);
 }
 
-function backupKeys(agentId: string): void {
-	const dir = getKeysDir(agentId);
+function backupKeys(configDir: string, agentId: string): void {
+	const dir = getKeysDir(configDir, agentId);
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
 	for (const name of ["signing.key", "encryption.key"]) {
 		const src = join(dir, name);
@@ -70,17 +73,15 @@ export function registerKeys(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, opts: { agent?: string }) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
 					// Find handle from agent list
-					const agents = (
-						await client.get("/agents")
-					) as ListResponse<AgentRead>;
-					const agent = agents.items.find((a) => a.id === agentId);
+					const agent = agents.find((a) => a.id === agentId);
 					const handle = agent?.handle ?? "unknown";
 
-					const hasLocal = agentKeysExist(agentId);
+					const hasLocal = agentKeysExist(configDir, agentId);
 
 					let hasServer = false;
 					let serverKeys: AgentKeysResponse | undefined;
@@ -99,10 +100,10 @@ export function registerKeys(program: Command): void {
 					let encFingerprint = "-";
 
 					if (hasLocal) {
-						const keys = loadAgentKeys(agentId);
-						sigFingerprint = toBase64Url(keys.signing.publicKey).slice(0, 8);
+						const agentKeys = loadAgentKeys(configDir, agentId);
+						sigFingerprint = toBase64Url(agentKeys.signing.publicKey).slice(0, 8);
 						encFingerprint = toBase64Url(
-							keys.encryption.publicKey,
+							agentKeys.encryption.publicKey,
 						).slice(0, 8);
 					} else if (serverKeys) {
 						sigFingerprint = serverKeys.signing_public_key.x.slice(0, 8);
@@ -157,10 +158,11 @@ export function registerKeys(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, opts: { agent?: string }) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
-					if (agentKeysExist(agentId)) {
+					if (agentKeysExist(configDir, agentId)) {
 						printError(
 							`Keys already exist for agent ${agentId}. Use 'rine keys rotate' to replace them.`,
 						);
@@ -169,10 +171,10 @@ export function registerKeys(program: Command): void {
 					}
 
 					const agentKeys = generateAgentKeys();
-					const pubKeys = getAgentPublicKeys(agentId, agentKeys);
+					const pubKeys = getAgentPublicKeys(configDir, agentId, agentKeys);
 					await client.post(`/agents/${agentId}/keys`, pubKeys);
 					await verifyServerKeys(client, agentId, pubKeys);
-					saveAgentKeys(agentId, agentKeys);
+					saveAgentKeys(configDir, agentId, agentKeys);
 
 					printMutationOk(
 						`E2EE keys generated for agent ${agentId}`,
@@ -189,18 +191,19 @@ export function registerKeys(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, opts: { agent?: string }) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
-					if (agentKeysExist(agentId)) {
-						backupKeys(agentId);
+					if (agentKeysExist(configDir, agentId)) {
+						backupKeys(configDir, agentId);
 					}
 
 					const agentKeys = generateAgentKeys();
-					const pubKeys = getAgentPublicKeys(agentId, agentKeys);
+					const pubKeys = getAgentPublicKeys(configDir, agentId, agentKeys);
 					await client.post(`/agents/${agentId}/keys`, pubKeys);
 					await verifyServerKeys(client, agentId, pubKeys);
-					saveAgentKeys(agentId, agentKeys);
+					saveAgentKeys(configDir, agentId, agentKeys);
 
 					printMutationOk(`E2EE keys rotated for agent ${agentId}`, gOpts.json);
 				},
@@ -215,16 +218,17 @@ export function registerKeys(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts }, opts: { agent?: string; output: string }) => {
-					const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string; output: string }) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
-					if (!agentKeysExist(agentId)) {
+					if (!agentKeysExist(configDir, agentId)) {
 						printError(`No keys found for agent ${agentId}`);
 						process.exitCode = 1;
 						return;
 					}
 
-					const agentKeys = loadAgentKeys(agentId);
+					const agentKeys = loadAgentKeys(configDir, agentId);
 					const exported: KeyExport = {
 						agent_id: agentId,
 						signing_private_key: toBase64Url(agentKeys.signing.privateKey),
@@ -293,7 +297,8 @@ export function registerKeys(program: Command): void {
 					return;
 				}
 
-				const dir = join(getConfigDir(), "keys", data.agent_id);
+				const configDir = resolveConfigDir();
+				const dir = join(configDir, "keys", data.agent_id);
 				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
 				const sigPath = join(dir, "signing.key");

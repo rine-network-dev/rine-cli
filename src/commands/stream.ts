@@ -1,14 +1,21 @@
 import type { Command } from "commander";
 import { createEventSource } from "eventsource-client";
-import { getApiUrl } from "../config.js";
-import { ingestSenderKeyDistribution } from "../crypto/ingest.js";
-import { agentKeysExist } from "../crypto/keys.js";
-import { decryptGroupMessage, decryptMessage } from "../crypto/message.js";
-import { formatError } from "../errors.js";
-import { type HttpClient, createClient, getOrRefreshToken } from "../http.js";
+import { createClient } from "../action.js";
+import {
+	type HttpClient,
+	agentKeysExist,
+	decryptGroupMessage,
+	decryptMessage,
+	fetchAgents,
+	formatError,
+	getOrRefreshToken,
+	ingestSenderKeyDistribution,
+	resolveAgent,
+	resolveApiUrl,
+	resolveConfigDir,
+} from "@rine-network/core";
 import { fetchAndIngestPendingSKDistributions } from "./sender-key-ops.js";
 import { printError } from "../output.js";
-import { resolveAgent } from "../resolve-agent.js";
 import type { GlobalOpts } from "../types.js";
 
 interface MessageData {
@@ -25,6 +32,7 @@ interface MessageData {
 async function formatMessageLine(
 	dataStr: string,
 	agentId: string,
+	configDir: string,
 	client: HttpClient,
 ): Promise<string> {
 	try {
@@ -37,35 +45,35 @@ async function formatMessageLine(
 			: msgType;
 
 		let preview = "[encrypted]";
-		if (data.encrypted_payload && agentKeysExist(agentId)) {
+		if (data.encrypted_payload && agentKeysExist(configDir, agentId)) {
 			let result: Awaited<ReturnType<typeof decryptMessage>> | undefined;
 
 			if (data.encryption_version === "sender-key-v1" && data.group_id) {
 				try {
-					result = await decryptGroupMessage(agentId, data.group_id, data.encrypted_payload, client);
+					result = await decryptGroupMessage(configDir, agentId, data.group_id, data.encrypted_payload, client);
 				} catch (err) {
 					const match =
 						err instanceof Error &&
 						err.message.match(/^unknown sender key id: (.+)$/);
 					if (match) {
 						const ingested = await fetchAndIngestPendingSKDistributions(
-							client, agentId, match[1],
+							client, configDir, agentId, match[1],
 						);
 						if (ingested > 0) {
 							try {
-								result = await decryptGroupMessage(agentId, data.group_id, data.encrypted_payload, client);
+								result = await decryptGroupMessage(configDir, agentId, data.group_id, data.encrypted_payload, client);
 							} catch { /* retry exhausted */ }
 						}
 					}
 				}
 			} else if (data.encryption_version === "hpke-v1") {
 				try {
-					result = await decryptMessage(agentId, data.encrypted_payload, client);
+					result = await decryptMessage(configDir, agentId, data.encrypted_payload, client);
 				} catch { /* decrypt failed */ }
 			}
 
 			if (result) {
-				ingestSenderKeyDistribution(agentId, data.type ?? "", result);
+				ingestSenderKeyDistribution(configDir, agentId, data.type ?? "", result);
 				const verified = result.verified ? "\u2713" : "?";
 				preview = `[${verified}] ${result.plaintext.slice(0, 60)}`;
 			} else if (data.encryption_version === "hpke-v1" || data.encryption_version === "sender-key-v1") {
@@ -88,13 +96,17 @@ export function registerStream(program: Command): void {
 		.action(async (opts: { agent?: string; verbose?: boolean }) => {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
+				const configDir = resolveConfigDir();
+				const apiUrl = resolveApiUrl();
 				const { client, profileName, entry } = await createClient(
+					configDir,
+					apiUrl,
 					gOpts.profile,
 				);
 
-				const agentId = await resolveAgent(client, opts.agent, gOpts.as);
+				const agents = await fetchAgents(client);
+				const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
-				const apiUrl = getApiUrl();
 				const url = `${apiUrl}/agents/${agentId}/stream`;
 				let lastEventId: string | undefined;
 				let backoff = 1;
@@ -107,7 +119,11 @@ export function registerStream(program: Command): void {
 
 				while (!stopped) {
 					try {
-						const token = await getOrRefreshToken(entry, profileName, false);
+						const envToken = process.env.RINE_TOKEN;
+						const token = await getOrRefreshToken(configDir, apiUrl, entry, profileName, {
+							force: false,
+							envToken,
+						});
 						const headers: Record<string, string> = {
 							Authorization: `Bearer ${token}`,
 							Accept: "text/event-stream",
@@ -130,7 +146,7 @@ export function registerStream(program: Command): void {
 									if (gOpts.json) {
 										console.log(JSON.stringify({ event, id, data }));
 									} else if (event === "message") {
-										formatMessageLine(data, agentId, client).then(
+										formatMessageLine(data, agentId, configDir, client).then(
 											(line) => console.log(line),
 											() => console.log(`[message] ${data.slice(0, 80)}`),
 										);

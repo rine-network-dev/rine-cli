@@ -1,15 +1,28 @@
 import type { Command } from "commander";
-import { formatError } from "./errors.js";
-import { type HttpClient, createClient } from "./http.js";
+import {
+	type CredentialEntry,
+	type HttpClient,
+	type TokenFn,
+	HttpClient as HttpClientClass,
+	fetchAgents,
+	formatError,
+	getCredentialEntry,
+	getOrRefreshToken,
+	isBareAgentName,
+	resolveAgent,
+	resolveApiUrl,
+	resolveConfigDir,
+	resolveToUuid,
+} from "@rine-network/core";
 import { printError } from "./output.js";
-import { isBareAgentName, resolveAgent, resolveToUuid } from "./resolve-agent.js";
 import type { GlobalOpts } from "./types.js";
 
 export type ActionContext = {
 	client: HttpClient;
 	gOpts: GlobalOpts;
 	profileName: string;
-	/** Extra headers injected on every request (e.g. X-Rine-Agent from --as). */
+	configDir: string;
+	apiUrl: string;
 	extraHeaders: Record<string, string>;
 };
 
@@ -18,33 +31,55 @@ type ActionFn = (ctx: ActionContext, ...args: any[]) => Promise<void>;
 // biome-ignore lint/suspicious/noExplicitAny: commander passes heterogeneous positional args
 type WrappedFn = (...args: any[]) => Promise<void>;
 
-/**
- * Wraps a command action with automatic client creation and error handling.
- * Commander calls action(fn) with positional args first, then the options object.
- * This wrapper forwards all arguments to the inner function.
- */
+async function createClient(
+	configDir: string,
+	apiUrl: string,
+	profileFlag?: string,
+	defaultHeaders?: Record<string, string>,
+): Promise<{
+	client: HttpClientClass;
+	profileName: string;
+	entry: CredentialEntry | undefined;
+}> {
+	const profileName = profileFlag ?? "default";
+	const entry = getCredentialEntry(configDir, profileName);
+	const envToken = process.env.RINE_TOKEN;
+	const canRefresh = !envToken && entry !== undefined;
+	const tokenFn: TokenFn = (force = false) =>
+		getOrRefreshToken(configDir, apiUrl, entry, profileName, { force, envToken });
+	const client = new HttpClientClass({ tokenFn, apiUrl, canRefresh, defaultHeaders });
+	return { client, profileName, entry };
+}
+
+export { createClient };
+
 export function withClient(program: Command, fn: ActionFn): WrappedFn {
 	return async (...args) => {
 		try {
 			const gOpts = program.opts<GlobalOpts>();
+			const configDir = resolveConfigDir();
+			const apiUrl = resolveApiUrl();
 			const defaultHeaders: Record<string, string> = {};
 			if (gOpts.as && !isBareAgentName(gOpts.as)) {
-				defaultHeaders["X-Rine-Agent"] = await resolveToUuid(gOpts.as);
+				defaultHeaders["X-Rine-Agent"] = await resolveToUuid(apiUrl, gOpts.as);
 			}
 			const { client, profileName } = await createClient(
+				configDir,
+				apiUrl,
 				gOpts.profile,
 				defaultHeaders,
 			);
-			// Lazy resolve: bare names need the client to fetch the agent list
 			if (gOpts.as && isBareAgentName(gOpts.as)) {
+				const agents = await fetchAgents(client);
 				defaultHeaders["X-Rine-Agent"] = await resolveAgent(
-					client,
+					apiUrl,
+					agents,
 					undefined,
 					gOpts.as,
 				);
 			}
 			await fn(
-				{ client, gOpts, profileName, extraHeaders: defaultHeaders },
+				{ client, gOpts, profileName, configDir, apiUrl, extraHeaders: defaultHeaders },
 				...args,
 			);
 		} catch (err) {
@@ -54,10 +89,6 @@ export function withClient(program: Command, fn: ActionFn): WrappedFn {
 	};
 }
 
-/**
- * Wraps a command action with error handling only (no client creation).
- * For commands like logout that don't need authentication.
- */
 export function withErrorHandler(
 	program: Command,
 	// biome-ignore lint/suspicious/noExplicitAny: commander passes heterogeneous positional args

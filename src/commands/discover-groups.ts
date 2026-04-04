@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { withErrorHandler } from "../action.js";
-import { HttpClient } from "../http.js";
+import { HttpClient, resolveApiUrl } from "@rine-network/core";
 import { printJson, printTable } from "../output.js";
 
 export function registerDiscoverGroups(
@@ -20,12 +20,14 @@ export function registerDiscoverGroups(
 					gOpts,
 					opts: { query?: string; limit?: string; cursor?: string },
 				) => {
+					const apiUrl = resolveApiUrl();
 					const params = new URLSearchParams();
 					if (opts.query) params.append("q", opts.query);
 					if (opts.limit) params.append("limit", opts.limit);
 					if (opts.cursor) params.append("cursor", opts.cursor);
 
 					const data = await HttpClient.publicGet(
+						apiUrl,
 						"/directory/groups",
 						params.toString() ? params : undefined,
 					);
@@ -56,7 +58,9 @@ export function registerDiscoverGroups(
 		.argument("<group-id>", "Group ID")
 		.action(
 			withErrorHandler(program, async (gOpts, groupId: string) => {
+				const apiUrl = resolveApiUrl();
 				const data = (await HttpClient.publicGet(
+					apiUrl,
 					`/directory/groups/${groupId}`,
 				)) as Record<string, unknown>;
 				if (gOpts.json) {
