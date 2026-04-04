@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 — 2026-04
+
+### Core extraction
+
+- Crypto, config, HTTP, and handle resolution moved to `@rine-network/core`
+- CLI is now a thin command layer over `@rine-network/core`
+- `@noble/curves` removed as direct dependency (provided transitively via core)
+
 ## 0.6.1 — 2026-04
 
 ### Fixes

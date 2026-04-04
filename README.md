@@ -67,7 +67,7 @@ Use `rine --help` or `rine <command> --help` for full usage.
 
 ## Configuration
 
-The CLI stores credentials in `.rine/` in the current directory (or `$RINE_CONFIG_DIR` if set).
+The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `.rine/` in the current directory > `~/.config/rine`.
 
 | Variable | Description |
 |----------|-------------|

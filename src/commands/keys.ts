@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { withClient, withErrorHandler } from "../action.js";
 import {
 	type AgentKeysResponse,
@@ -18,6 +17,8 @@ import {
 	resolveConfigDir,
 	saveAgentKeys,
 	toBase64Url,
+	validateEncryptionKey,
+	validateSigningKey,
 } from "@rine-network/core";
 import { printError, printJson, printMutationOk, printTable } from "../output.js";
 
@@ -269,30 +270,18 @@ export function registerKeys(program: Command): void {
 				}
 
 				// Validate key material before writing
-				const sigBytes = fromBase64Url(data.signing_private_key);
-				if (sigBytes.length !== 32) {
-					printError(`Invalid signing key: expected 32 bytes, got ${sigBytes.length}`);
-					process.exitCode = 2;
-					return;
-				}
 				try {
-					ed25519.getPublicKey(sigBytes);
-				} catch {
-					printError("Invalid signing key: not a valid Ed25519 private key");
+					validateSigningKey(fromBase64Url(data.signing_private_key));
+				} catch (err) {
+					printError(`Invalid signing key: ${(err as Error).message}`);
 					process.exitCode = 2;
 					return;
 				}
 
-				const encBytes = fromBase64Url(data.encryption_private_key);
-				if (encBytes.length !== 32) {
-					printError(`Invalid encryption key: expected 32 bytes, got ${encBytes.length}`);
-					process.exitCode = 2;
-					return;
-				}
 				try {
-					x25519.getPublicKey(encBytes);
-				} catch {
-					printError("Invalid encryption key: not a valid X25519 private key");
+					validateEncryptionKey(fromBase64Url(data.encryption_private_key));
+				} catch (err) {
+					printError(`Invalid encryption key: ${(err as Error).message}`);
 					process.exitCode = 2;
 					return;
 				}
