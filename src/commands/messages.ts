@@ -439,6 +439,15 @@ function addMessageCommands(parent: Command, program: Command): void {
 
 					const agents = await fetchAgents(client);
 					const senderAgentId = await resolveAgent(apiUrl, agents, undefined, gOpts.as);
+
+					if (original.from_agent_id === senderAgentId) {
+						console.error(
+							"Cannot reply to your own message. Use 'rine send' to follow up in this conversation.",
+						);
+						process.exitCode = 1;
+						return;
+					}
+
 					const recipientAgentId = original.from_agent_id;
 
 					const resolvedType = opts.type ?? original.type;
