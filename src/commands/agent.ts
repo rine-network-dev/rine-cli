@@ -4,13 +4,9 @@ import {
 	type AgentRead,
 	type ListResponse,
 	RineApiError,
-	encryptionPublicKeyToJWK,
-	generateAgentKeys,
-	loadCredentials,
-	saveAgentKeys,
-	saveCredentials,
-	signingPublicKeyToJWK,
+	performAgentCreation,
 } from "@rine-network/core";
+import { toAgentRow } from "../agent-format.js";
 import {
 	printError,
 	printJson,
@@ -18,41 +14,6 @@ import {
 	printTable,
 } from "../output.js";
 import { promptConfirm, promptText } from "../prompt.js";
-
-type AgentTableRow = {
-	ID: string;
-	Name: string;
-	Handle: string;
-	"Human Oversight": string;
-	Created: string;
-	Card?: string;
-	Revoked?: string;
-	"Verification Words"?: string;
-};
-
-function toAgentRow(
-	a: AgentRead,
-	opts: {
-		includeCard?: boolean;
-		includeRevoked?: boolean;
-		includeVerificationWords?: boolean;
-	} = {},
-): AgentTableRow {
-	const row: AgentTableRow = {
-		ID: a.id,
-		Name: a.name,
-		Handle: a.handle,
-		"Human Oversight": String(a.human_oversight),
-		Created: a.created_at,
-	};
-	if (opts.includeVerificationWords && a.verification_words) {
-		row["Verification Words"] = a.verification_words;
-	}
-	if (opts.includeCard) row.Card = a.unlisted ? "unlisted" : "public";
-	if (opts.includeRevoked)
-		row.Revoked = a.revoked_at ? String(a.revoked_at) : "\u2014";
-	return row;
-}
 
 export function registerAgent(program: Command): void {
 	const agent = program.command("agent").description("Agent management");
@@ -79,36 +40,13 @@ export function registerAgent(program: Command): void {
 							return;
 						}
 					}
-					const agentKeys = generateAgentKeys();
 
-					const body: Record<string, unknown> = {
+					const profile = gOpts.profile ?? "default";
+					const data = await performAgentCreation(client, configDir, profile, {
 						name,
-						signing_public_key: signingPublicKeyToJWK(
-							agentKeys.signing.publicKey,
-						),
-						encryption_public_key: encryptionPublicKeyToJWK(
-							agentKeys.encryption.publicKey,
-						),
-					};
-					if (opts.humanOversight !== undefined) {
-						body.human_oversight = opts.humanOversight;
-					}
-					if (opts.unlisted) body.unlisted = true;
-					const data = (await client.post("/agents", body)) as AgentRead & {
-						poll_url?: string;
-					};
-
-					saveAgentKeys(configDir, data.id, agentKeys);
-
-					// Store poll_url in credentials if returned
-					if (data.poll_url) {
-						const profile = gOpts.profile ?? "default";
-						const creds = loadCredentials(configDir);
-						if (creds[profile]) {
-							creds[profile].poll_url = data.poll_url;
-							saveCredentials(configDir, creds);
-						}
-					}
+						humanOversight: opts.humanOversight,
+						unlisted: opts.unlisted,
+					});
 
 					if (gOpts.json) {
 						printJson(data);

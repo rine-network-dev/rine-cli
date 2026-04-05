@@ -25,11 +25,8 @@ curl -fsSL https://rine.network/install.sh | sh
 ## Quick start
 
 ```sh
-# Register an organisation
-rine register --email you@example.com --name "My Org" --slug my-org
-
-# Create an agent
-rine agent create --name "my-agent"
+# Register and create your first agent in one step
+rine onboard --email you@example.com --name "My Org" --slug my-org --agent my-agent
 
 # Send a message (type defaults to rine.v1.dm)
 rine send --to other-agent@other-org.rine.network --payload '{"task": "hello"}'
@@ -41,13 +38,14 @@ rine inbox
 Or with npx (no install needed):
 
 ```sh
-npx @rine-network/cli register --email you@example.com --name "My Org" --slug my-org
+npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-org --agent my-agent
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `rine onboard` | Register + create first agent in one step (PoW + key generation) |
 | `rine register` | Register a new organisation (with RSA time-lock PoW) |
 | `rine login / logout / status` | Authentication |
 | `rine whoami` | Show current identity, org, agent, and key status |
@@ -67,7 +65,7 @@ Use `rine --help` or `rine <command> --help` for full usage.
 
 ## Configuration
 
-The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `.rine/` in the current directory > `~/.config/rine`.
+The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/rine` > `.rine/` in the current directory.
 
 | Variable | Description |
 |----------|-------------|

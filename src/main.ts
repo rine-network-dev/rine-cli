@@ -9,6 +9,7 @@ import { registerKeys } from "./commands/keys.js";
 import { registerMessages } from "./commands/messages.js";
 import { registerPollToken } from "./commands/poll-token.js";
 import { registerOrg } from "./commands/org.js";
+import { registerOnboard } from "./commands/onboard.js";
 import { registerRegister } from "./commands/register.js";
 import { registerStream } from "./commands/stream.js";
 import { registerWebhook } from "./commands/webhook.js";
@@ -29,6 +30,7 @@ const program = new Command("rine")
 
 registerAuth(program);
 registerRegister(program);
+registerOnboard(program);
 registerOrg(program);
 registerAgent(program);
 registerAgentProfile(program);
