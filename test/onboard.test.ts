@@ -37,6 +37,8 @@ const MOCK_AGENT: core.AgentRead = {
 	id: "agent-uuid",
 	name: "my-agent",
 	handle: "my-agent@test-org.rine.network",
+	incoming_policy: "open",
+	outgoing_policy: "open",
 	human_oversight: true,
 	unlisted: false,
 	created_at: "2026-01-01T00:00:00Z",
