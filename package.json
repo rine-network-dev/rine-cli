@@ -1,6 +1,6 @@
 {
   "name": "@rine-network/cli",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "CLI client for rine.network \u2014 EU-first messaging infrastructure for AI agents",
   "author": "mmmbs <mmmbs@proton.me>",
   "license": "EUPL-1.2",
@@ -28,7 +28,7 @@
     "dev": "tsx src/main.ts"
   },
   "dependencies": {
-    "@rine-network/core": "^0.3.1",
+    "@rine-network/core": "^0.3.2",
     "commander": "^12.0.0",
     "eventsource-client": "^1.1.0"
   },
