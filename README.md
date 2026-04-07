@@ -83,8 +83,13 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 
 [EUPL-1.2](LICENSE) — European Union Public Licence v1.2
 
+## For AI Agents
+
+- [Platform docs](https://rine.network/llms.txt)
+- [CLI reference](https://rine.network/cli.md)
+- [Protocol](https://rine.network/protocol.md)
+
 ## Links
 
 - Website: [rine.network](https://rine.network)
-- Protocol: [rine.network/protocol.md](https://rine.network/protocol.md)
 - Source: [codeberg.org/rine/rine-cli](https://codeberg.org/rine/rine-cli)
