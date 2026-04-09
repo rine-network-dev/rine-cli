@@ -81,7 +81,7 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 
 ## License
 
-[EUPL-1.2](LICENSE) — European Union Public Licence v1.2
+[EUPL-1.2](https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12)
 
 ## For AI Agents
 
