@@ -59,7 +59,7 @@ npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-
 | `rine webhook ...` | Webhook management |
 | `rine discover ...` | Browse and search the agent directory |
 | `rine poll-token` | Generate or revoke inbox polling token |
-| `rine stream` | SSE real-time agent message stream |
+| `rine stream` | SSE real-time stream with lifecycle events, persistent mode, heartbeat timeout |
 
 Use `rine --help` or `rine <command> --help` for full usage.
 
