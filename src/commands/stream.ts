@@ -29,6 +29,28 @@ interface MessageData {
 	encryption_version?: string;
 }
 
+type DisconnectReason = "heartbeat_timeout" | "server_close" | "error" | "signal";
+
+interface StreamOpts {
+	agent?: string;
+	verbose?: boolean;
+	persistent?: boolean;
+	heartbeatTimeout?: string;
+}
+
+function emitLifecycle(
+	gOpts: GlobalOpts,
+	data: Record<string, unknown>,
+): void {
+	if (gOpts.json) {
+		console.log(JSON.stringify({ event: "lifecycle", data }));
+	}
+}
+
+function jitteredDelayMs(backoffSeconds: number): number {
+	return Math.round(backoffSeconds * (0.5 + Math.random()) * 1000);
+}
+
 async function formatMessageLine(
 	dataStr: string,
 	agentId: string,
@@ -93,7 +115,9 @@ export function registerStream(program: Command): void {
 		.description("Stream incoming messages via SSE")
 		.option("--agent <id>", "Agent ID to stream (defaults to your agent)")
 		.option("--verbose", "Show heartbeats and reconnect details")
-		.action(async (opts: { agent?: string; verbose?: boolean }) => {
+		.option("--persistent", "Disable server-side connection timeout")
+		.option("--heartbeat-timeout <seconds>", "Seconds of silence before reconnecting (default: 70)", "70")
+		.action(async (opts: StreamOpts) => {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
 				const configDir = resolveConfigDir();
@@ -107,17 +131,27 @@ export function registerStream(program: Command): void {
 				const agents = await fetchAgents(client);
 				const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
-				const url = `${apiUrl}/agents/${agentId}/stream`;
+				let url = `${apiUrl}/agents/${agentId}/stream`;
+				if (opts.persistent) {
+					url += "?persistent=true";
+				}
+
+				const heartbeatTimeoutMs = Math.max(Number(opts.heartbeatTimeout) || 70, 10) * 1000;
+
 				let lastEventId: string | undefined;
 				let backoff = 1;
-
+				let attempt = 0;
 				let stopped = false;
+
 				process.on("SIGINT", () => {
 					stopped = true;
 					process.exitCode = 0;
 				});
 
 				while (!stopped) {
+					attempt++;
+					const state = { disconnectReason: "server_close" as DisconnectReason };
+
 					try {
 						const envToken = process.env.RINE_TOKEN;
 						const token = await getOrRefreshToken(configDir, apiUrl, entry, profileName, {
@@ -132,15 +166,31 @@ export function registerStream(program: Command): void {
 							headers["Last-Event-ID"] = lastEventId;
 						}
 
+						emitLifecycle(gOpts, { state: "connecting", attempt, url });
+
 						await new Promise<void>((resolve) => {
 							if (stopped) {
 								resolve();
 								return;
 							}
+
+							let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+
+							const resetHeartbeatTimer = () => {
+								if (heartbeatTimer) clearTimeout(heartbeatTimer);
+								heartbeatTimer = setTimeout(() => {
+									state.disconnectReason = "heartbeat_timeout";
+									es.close();
+									resolve();
+								}, heartbeatTimeoutMs);
+							};
+
 							const es = createEventSource({
 								url,
 								headers,
 								onMessage: ({ event, data, id }) => {
+									resetHeartbeatTimer();
+
 									if (id) lastEventId = id;
 
 									if (gOpts.json) {
@@ -154,14 +204,31 @@ export function registerStream(program: Command): void {
 										process.stderr.write(`[heartbeat] ${data}\n`);
 									}
 								},
-								onDisconnect: () => resolve(),
+								onDisconnect: () => {
+									if (heartbeatTimer) clearTimeout(heartbeatTimer);
+									state.disconnectReason = "server_close";
+									resolve();
+								},
 								onScheduleReconnect: () => {
+									if (heartbeatTimer) clearTimeout(heartbeatTimer);
 									es.close();
 									resolve();
 								},
 							});
 
+							// Start heartbeat timer and emit connected
+							resetHeartbeatTimer();
+							if (attempt === 1 && !gOpts.json) {
+								process.stderr.write(`Connected to stream for agent ${agentId}\n`);
+								if (opts.persistent) {
+									process.stderr.write("Persistent mode (no server timeout)\n");
+								}
+							}
+							emitLifecycle(gOpts, { state: "connected", attempt });
+
 							const onStop = () => {
+								if (heartbeatTimer) clearTimeout(heartbeatTimer);
+								state.disconnectReason = "signal";
 								es.close();
 								resolve();
 							};
@@ -172,15 +239,55 @@ export function registerStream(program: Command): void {
 							process.once("SIGINT", onStop);
 						});
 
-						backoff = 1;
-					} catch {
-						if (stopped) break;
-						if (opts.verbose) {
-							process.stderr.write(`Reconnecting in ${backoff}s...\n`);
+						if (state.disconnectReason === "heartbeat_timeout") {
+							const jitteredBackoff = jitteredDelayMs(backoff);
+							emitLifecycle(gOpts, {
+								state: "reconnecting",
+								reason: "heartbeat_timeout",
+								attempt: attempt + 1,
+								backoff_ms: jitteredBackoff,
+							});
+							if (!gOpts.json) {
+								process.stderr.write(`Reconnecting (attempt ${attempt + 1}, heartbeat timeout)...\n`);
+							}
+							await new Promise((r) => setTimeout(r, jitteredBackoff));
+							backoff = Math.min(backoff * 2, 30);
+						} else if (state.disconnectReason === "signal") {
+							emitLifecycle(gOpts, { state: "stopped", reason: "signal" });
+							break;
 						} else {
-							process.stderr.write("Reconnecting...\n");
+							// Server-initiated close (heartbeat limit or clean close)
+							emitLifecycle(gOpts, {
+								state: "reconnecting",
+								reason: "server_close",
+								attempt: attempt + 1,
+								backoff_ms: 0,
+							});
+							if (!gOpts.json) {
+								process.stderr.write(`Reconnecting (attempt ${attempt + 1}, server close)...\n`);
+							}
+							backoff = 1;
 						}
-						await new Promise((r) => setTimeout(r, backoff * 1000));
+					} catch (err) {
+						if (stopped) {
+							emitLifecycle(gOpts, { state: "stopped", reason: "signal" });
+							break;
+						}
+						const errorMsg = err instanceof Error ? err.message : String(err);
+						const jitteredBackoff = jitteredDelayMs(backoff);
+						emitLifecycle(gOpts, {
+							state: "reconnecting",
+							reason: "error",
+							attempt: attempt + 1,
+							backoff_ms: jitteredBackoff,
+							error: errorMsg,
+						});
+						if (opts.verbose) {
+							process.stderr.write(`Reconnecting in ${Math.round(jitteredBackoff / 1000)}s (attempt ${attempt + 1}, error: ${errorMsg})...\n`);
+						} else {
+							process.stderr.write(`Reconnecting (attempt ${attempt + 1}, error)...\n`);
+						}
+						await new Promise((r) => setTimeout(r, jitteredBackoff));
 						backoff = Math.min(backoff * 2, 30);
 					}
 				}
