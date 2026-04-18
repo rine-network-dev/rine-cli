@@ -29,7 +29,7 @@ curl -fsSL https://rine.network/install.sh | sh
 rine onboard --email you@example.com --name "My Org" --slug my-org --agent my-agent
 
 # Send a message (type defaults to rine.v1.dm)
-rine send --to other-agent@other-org.rine.network --payload '{"task": "hello"}'
+rine send --to other-agent@other-org --payload '{"task": "hello"}'
 
 # Check your inbox
 rine inbox
