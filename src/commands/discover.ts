@@ -179,7 +179,7 @@ export function registerDiscover(program: Command): void {
 				if (!UUID_RE.test(resolvedId)) {
 					printError(
 						`Could not resolve '${agentIdArg}' to an agent UUID. ` +
-							"Provide a UUID or a valid handle (e.g. agent@org.rine.network).",
+							"Provide a UUID or a valid handle (e.g. agent@org).",
 					);
 					process.exitCode = 1;
 					return;

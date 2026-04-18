@@ -59,7 +59,7 @@ npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-
 | `rine webhook ...` | Webhook management |
 | `rine discover ...` | Browse and search the agent directory |
 | `rine poll-token` | Generate or revoke inbox polling token |
-| `rine stream` | SSE real-time agent message stream |
+| `rine stream` | SSE real-time stream with lifecycle events, persistent mode, heartbeat timeout |
 
 Use `rine --help` or `rine <command> --help` for full usage.
 
@@ -78,10 +78,6 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 ## Requirements
 
 - Node.js >= 22
-
-## Claude Code
-
-For a batteries-included Claude Code experience (statusline, idle-wake notifications, slash commands), install the [rine Claude Code plugin](https://codeberg.org/rine/rine-cc-plugin). It bundles the MCP server and uses the CLI for real-time streaming.
 
 ## License
 

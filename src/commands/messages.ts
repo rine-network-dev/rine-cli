@@ -13,6 +13,7 @@ import {
 	fetchAgents,
 	fetchRecipientEncryptionKey,
 	ingestSenderKeyDistribution,
+	normalizeHandle,
 	resolveAgent,
 	resolveToUuid,
 } from "@rine-network/core";
@@ -97,12 +98,12 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.description("Send an encrypted message")
 		.requiredOption(
 			"--to <address>",
-			"Recipient: agent handle, agent ID, or #group@org handle",
+			"Recipient: agent handle (agent@org), agent ID, or group handle (#group@org)",
 		)
 		.option("--type <type>", "Message type (default: rine.v1.dm)")
 		.option("--payload <json>", "Message payload as JSON string")
 		.option("--payload-file <path>", "Read payload JSON from file (use - for stdin)")
-		.option("--from <address>", "Sender address (agent ID or handle with @)")
+		.option("--from <address>", "Sender: agent handle (agent@org) or agent ID")
 		.option("--idempotency-key <key>", "Idempotency key header")
 		.action(
 			withClient(
@@ -126,11 +127,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 					}
 					const parsedPayload = result.parsed;
 
+					const to = normalizeHandle(opts.to);
+					const from = opts.from ? normalizeHandle(opts.from) : opts.from;
+
 					const extraHeaders: Record<string, string> = {};
 					let senderAgentId: string | undefined;
 
-					if (opts.from !== undefined) {
-						senderAgentId = await resolveToUuid(apiUrl, opts.from);
+					if (from !== undefined) {
+						senderAgentId = await resolveToUuid(apiUrl, from);
 						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else if (!gOpts.as) {
 						const agents = await fetchAgents(client);
@@ -147,27 +151,27 @@ function addMessageCommands(parent: Command, program: Command): void {
 
 					// Resolve recipient ID for key fetch
 					let recipientAgentId: string | undefined;
-					if (!opts.to.includes("@")) {
-						recipientAgentId = opts.to;
-					} else if (!opts.to.startsWith("#")) {
-						recipientAgentId = await resolveToUuid(apiUrl, opts.to);
+					if (!to.includes("@")) {
+						recipientAgentId = to;
+					} else if (!to.startsWith("#")) {
+						recipientAgentId = await resolveToUuid(apiUrl, to);
 					}
 
 					// Build body with encryption
 					const resolvedType = opts.type ?? "rine.v1.dm";
 					const body: Record<string, unknown> = { type: resolvedType };
 
-					if (opts.to.includes("@")) {
-						body.to_handle = opts.to;
+					if (to.includes("@")) {
+						body.to_handle = to;
 					} else {
-						body.to_agent_id = opts.to;
+						body.to_agent_id = to;
 					}
 
-					if (opts.from?.includes("@")) {
-						body.from_handle = opts.from;
+					if (from?.includes("@")) {
+						body.from_handle = from;
 					}
 
-					const isGroupSend = opts.to.startsWith("#");
+					const isGroupSend = to.startsWith("#");
 
 					if (isGroupSend && senderAgentId) {
 						// Group send: use sender-key encryption
@@ -175,7 +179,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 							client,
 							configDir,
 							senderAgentId,
-							opts.to,
+							to,
 							Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
 						);
 						const { result: encResult } = await encryptGroupMessage(
