@@ -79,6 +79,10 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 
 - Node.js >= 22
 
+## Claude Code
+
+For a batteries-included Claude Code experience (statusline, idle-wake notifications, slash commands), install the [rine Claude Code plugin](https://codeberg.org/rine/rine-cc-plugin). It bundles the MCP server and uses the CLI for real-time streaming.
+
 ## License
 
 [EUPL-1.2](https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12)

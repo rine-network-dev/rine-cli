@@ -426,4 +426,109 @@ describe("rine stream", () => {
 			expect(reconnecting.data.error).toBe("connection refused");
 		});
 	});
+
+	describe("--monitor mode", () => {
+		it("suppresses lifecycle events from stdout, redirects to stderr", async () => {
+			const out = captureStdout();
+			const stderr = captureStderr();
+
+			mockCreateEventSource.mockImplementationOnce(makeMockEs((_opts) => {
+				Promise.resolve().then(() => _opts.onDisconnect?.());
+			}));
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json", "--monitor"]);
+			out.restore();
+			stderr.restore();
+
+			const stdoutLifecycle = out.lines.filter((l) => l.includes('"lifecycle"'));
+			expect(stdoutLifecycle).toHaveLength(0);
+
+			const stderrLifecycle = stderr.lines.filter((l) => l.includes('"lifecycle"'));
+			expect(stderrLifecycle.length).toBeGreaterThanOrEqual(2);
+		});
+
+		it("suppresses heartbeat events from stdout", async () => {
+			const out = captureStdout();
+			let onMsg: ((msg: any) => void) | undefined;
+
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				onMsg = opts.onMessage;
+				Promise.resolve().then(() => {
+					onMsg!({ event: "heartbeat", data: "{}", id: null });
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json", "--monitor"]);
+			out.restore();
+
+			const heartbeatLines = out.lines.filter((l) => l.includes('"heartbeat"'));
+			expect(heartbeatLines).toHaveLength(0);
+		});
+
+		it("passes message events through to stdout", async () => {
+			const out = captureStdout();
+			let onMsg: ((msg: any) => void) | undefined;
+
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				onMsg = opts.onMessage;
+				Promise.resolve().then(() => {
+					onMsg!({ event: "message", data: '{"type":"rine.v1.dm"}', id: "msg-1" });
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json", "--monitor"]);
+			out.restore();
+
+			const messageLines = out.lines
+				.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+				.filter((e): e is any => e?.event === "message");
+			expect(messageLines).toHaveLength(1);
+			expect(messageLines[0].event).toBe("message");
+			expect(messageLines[0].id).toBe("msg-1");
+		});
+
+		it("redirects stopped lifecycle to stderr on SIGINT", async () => {
+			const out = captureStdout();
+			const stderr = captureStderr();
+
+			mockCreateEventSource.mockImplementationOnce(makeMockEs(() => {
+				Promise.resolve().then(() => fireSigint());
+			}));
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json", "--monitor"]);
+			out.restore();
+			stderr.restore();
+
+			const stdoutStopped = out.lines.filter((l) => l.includes('"stopped"'));
+			expect(stdoutStopped).toHaveLength(0);
+
+			const stderrStopped = stderr.lines.filter((l) => l.includes('"stopped"'));
+			expect(stderrStopped.length).toBeGreaterThanOrEqual(1);
+		});
+
+		it("human-readable mode still shows connect on stderr", async () => {
+			const stderr = captureStderr();
+
+			mockCreateEventSource.mockImplementationOnce(makeMockEs(() => {
+				Promise.resolve().then(() => fireSigint());
+			}));
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--monitor"]);
+			stderr.restore();
+
+			const connectMsg = stderr.lines.find((l) => l.includes("Connected to stream"));
+			expect(connectMsg).toBeDefined();
+		});
+	});
 });

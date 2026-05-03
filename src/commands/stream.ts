@@ -36,14 +36,21 @@ interface StreamOpts {
 	verbose?: boolean;
 	persistent?: boolean;
 	heartbeatTimeout?: string;
+	monitor?: boolean;
 }
 
 function emitLifecycle(
 	gOpts: GlobalOpts,
+	monitor: boolean | undefined,
 	data: Record<string, unknown>,
 ): void {
 	if (gOpts.json) {
-		console.log(JSON.stringify({ event: "lifecycle", data }));
+		const line = JSON.stringify({ event: "lifecycle", data });
+		if (monitor) {
+			process.stderr.write(`${line}\n`);
+		} else {
+			console.log(line);
+		}
 	}
 }
 
@@ -117,6 +124,7 @@ export function registerStream(program: Command): void {
 		.option("--verbose", "Show heartbeats and reconnect details")
 		.option("--persistent", "Disable server-side connection timeout")
 		.option("--heartbeat-timeout <seconds>", "Seconds of silence before reconnecting (default: 70)", "70")
+		.option("--monitor", "Suppress non-message stdout (for CC plugin monitors)")
 		.action(async (opts: StreamOpts) => {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
@@ -166,7 +174,7 @@ export function registerStream(program: Command): void {
 							headers["Last-Event-ID"] = lastEventId;
 						}
 
-						emitLifecycle(gOpts, { state: "connecting", attempt, url });
+						emitLifecycle(gOpts, opts.monitor, { state: "connecting", attempt, url });
 
 						await new Promise<void>((resolve) => {
 							if (stopped) {
@@ -194,7 +202,9 @@ export function registerStream(program: Command): void {
 									if (id) lastEventId = id;
 
 									if (gOpts.json) {
-										console.log(JSON.stringify({ event, id, data }));
+										if (!opts.monitor || event === "message") {
+											console.log(JSON.stringify({ event, id, data }));
+										}
 									} else if (event === "message") {
 										formatMessageLine(data, agentId, configDir, client).then(
 											(line) => console.log(line),
@@ -224,7 +234,7 @@ export function registerStream(program: Command): void {
 									process.stderr.write("Persistent mode (no server timeout)\n");
 								}
 							}
-							emitLifecycle(gOpts, { state: "connected", attempt });
+							emitLifecycle(gOpts, opts.monitor, { state: "connected", attempt });
 
 							const onStop = () => {
 								if (heartbeatTimer) clearTimeout(heartbeatTimer);
@@ -241,7 +251,7 @@ export function registerStream(program: Command): void {
 
 						if (state.disconnectReason === "heartbeat_timeout") {
 							const jitteredBackoff = jitteredDelayMs(backoff);
-							emitLifecycle(gOpts, {
+							emitLifecycle(gOpts, opts.monitor, {
 								state: "reconnecting",
 								reason: "heartbeat_timeout",
 								attempt: attempt + 1,
@@ -253,11 +263,11 @@ export function registerStream(program: Command): void {
 							await new Promise((r) => setTimeout(r, jitteredBackoff));
 							backoff = Math.min(backoff * 2, 30);
 						} else if (state.disconnectReason === "signal") {
-							emitLifecycle(gOpts, { state: "stopped", reason: "signal" });
+							emitLifecycle(gOpts, opts.monitor, { state: "stopped", reason: "signal" });
 							break;
 						} else {
 							// Server-initiated close (heartbeat limit or clean close)
-							emitLifecycle(gOpts, {
+							emitLifecycle(gOpts, opts.monitor, {
 								state: "reconnecting",
 								reason: "server_close",
 								attempt: attempt + 1,
@@ -270,12 +280,12 @@ export function registerStream(program: Command): void {
 						}
 					} catch (err) {
 						if (stopped) {
-							emitLifecycle(gOpts, { state: "stopped", reason: "signal" });
+							emitLifecycle(gOpts, opts.monitor, { state: "stopped", reason: "signal" });
 							break;
 						}
 						const errorMsg = err instanceof Error ? err.message : String(err);
 						const jitteredBackoff = jitteredDelayMs(backoff);
-						emitLifecycle(gOpts, {
+						emitLifecycle(gOpts, opts.monitor, {
 							state: "reconnecting",
 							reason: "error",
 							attempt: attempt + 1,
