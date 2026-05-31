@@ -53,7 +53,7 @@ function inboxRow(m: MessageRead): Record<string, unknown> {
 		From: msgFrom(m),
 		Group: msgGroup(m),
 		Type: m.type,
-		Encryption: m.encryption_version,
+		Status: (m.status ?? "new").toUpperCase(),
 		Created: m.created_at,
 	};
 }
@@ -380,6 +380,9 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.command("inbox")
 		.description("List inbox messages")
 		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.option("--new", "Show only new (undelivered) messages")
+		.option("--delivered", "Show only delivered messages")
+		.option("--read", "Show only read messages")
 		.option("--limit <n>", "Maximum number of messages to return")
 		.option("--cursor <cursor>", "Pagination cursor")
 		.action(
@@ -387,12 +390,20 @@ function addMessageCommands(parent: Command, program: Command): void {
 				program,
 				async (
 					{ client, gOpts, apiUrl },
-					opts: { agent?: string; limit?: string; cursor?: string },
+					opts: { agent?: string; new?: boolean; delivered?: boolean; read?: boolean; limit?: string; cursor?: string },
 				) => {
+					const flags = [opts.new, opts.delivered, opts.read].filter(Boolean);
+					if (flags.length > 1) {
+						throw new Error("Only one of --new, --delivered, --read can be specified");
+					}
+
 					const agents = await fetchAgents(client);
 					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
 
 					const params: Record<string, string | number | boolean> = {};
+					if (opts.new) params.status = "new";
+					else if (opts.delivered) params.status = "delivered";
+					else if (opts.read) params.status = "read";
 					if (opts.limit) params.limit = opts.limit;
 					if (opts.cursor) params.cursor = opts.cursor;
 
