@@ -1,6 +1,12 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import { printError, printJson, printSuccess, printTable } from "../output.js";
+import {
+	printError,
+	printJson,
+	printMutationOk,
+	printSuccess,
+	printTable,
+} from "../output.js";
 
 const READ_ONLY_KEYS = [
 	"id",
@@ -72,6 +78,33 @@ function getAgentCmd(program: Command): Command {
 	return cmd;
 }
 
+const CSV_FIELD_CMDS = [
+	{
+		name: "set-categories",
+		desc: "Set agent categories",
+		flag: "--categories <cats>",
+		flagDesc: "Comma-separated category names",
+		field: "categories",
+		msg: "Categories updated",
+	},
+	{
+		name: "set-languages",
+		desc: "Set agent supported languages",
+		flag: "--languages <langs>",
+		flagDesc: "Comma-separated language codes",
+		field: "languages",
+		msg: "Languages updated",
+	},
+	{
+		name: "accept-types",
+		desc: "Set accepted message types",
+		flag: "--types <types>",
+		flagDesc: "Comma-separated message types",
+		field: "message_types_accepted",
+		msg: "Accept types updated",
+	},
+] as const;
+
 export function registerAgentProfile(program: Command): void {
 	const agent = getAgentCmd(program);
 
@@ -103,14 +136,10 @@ export function registerAgentProfile(program: Command): void {
 					agentId: string,
 					opts: { description: string },
 				) => {
-					const result = await updateCard(client, agentId, (card) => {
+					await updateCard(client, agentId, (card) => {
 						card.description = opts.description;
 					});
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Description updated");
-					}
+					printMutationOk("Description updated", gOpts.json);
 				},
 			),
 		);
@@ -142,7 +171,7 @@ export function registerAgentProfile(program: Command): void {
 						outputModes?: string;
 					},
 				) => {
-					const result = await updateCard(client, agentId, (card) => {
+					await updateCard(client, agentId, (card) => {
 						const skill: Record<string, unknown> = {
 							id: opts.skillId,
 							name: opts.skillName,
@@ -168,63 +197,7 @@ export function registerAgentProfile(program: Command): void {
 							skill,
 						];
 					});
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Skill added");
-					}
-				},
-			),
-		);
-
-	agent
-		.command("set-categories")
-		.description("Set agent categories")
-		.argument("<agent-id>", "Agent ID")
-		.requiredOption("--categories <cats>", "Comma-separated category names")
-		.action(
-			withClient(
-				program,
-				async (
-					{ client, gOpts },
-					agentId: string,
-					opts: { categories: string },
-				) => {
-					const cats = opts.categories.split(",").map((c) => c.trim());
-					const result = await updateCard(client, agentId, (card) =>
-						setRineField(card, "categories", cats),
-					);
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Categories updated");
-					}
-				},
-			),
-		);
-
-	agent
-		.command("set-languages")
-		.description("Set agent supported languages")
-		.argument("<agent-id>", "Agent ID")
-		.requiredOption("--languages <langs>", "Comma-separated language codes")
-		.action(
-			withClient(
-				program,
-				async (
-					{ client, gOpts },
-					agentId: string,
-					opts: { languages: string },
-				) => {
-					const langs = opts.languages.split(",").map((l) => l.trim());
-					const result = await updateCard(client, agentId, (card) =>
-						setRineField(card, "languages", langs),
-					);
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Languages updated");
-					}
+					printMutationOk("Skill added", gOpts.json);
 				},
 			),
 		);
@@ -248,37 +221,76 @@ export function registerAgentProfile(program: Command): void {
 						process.exitCode = 2;
 						return;
 					}
-					const result = await updateCard(client, agentId, (card) =>
+					await updateCard(client, agentId, (card) =>
 						setRineField(card, "pricing_model", opts.model),
 					);
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Pricing updated");
-					}
+					printMutationOk("Pricing updated", gOpts.json);
 				},
 			),
 		);
 
+	for (const def of CSV_FIELD_CMDS) {
+		agent
+			.command(def.name)
+			.description(def.desc)
+			.argument("<agent-id>", "Agent ID")
+			.requiredOption(def.flag, def.flagDesc)
+			.action(
+				withClient(
+					program,
+					async (
+						{ client, gOpts },
+						agentId: string,
+						opts: Record<string, string>,
+					) => {
+						const raw = Object.values(opts)[0]!;
+						await updateCard(client, agentId, (card) =>
+							setRineField(
+								card,
+								def.field,
+								raw.split(",").map((s) => s.trim()),
+							),
+						);
+						printMutationOk(def.msg, gOpts.json);
+					},
+				),
+			);
+	}
+
 	agent
-		.command("accept-types")
-		.description("Set accepted message types")
+		.command("enable-a2a")
+		.description("Enable A2A protocol bridge for this agent")
 		.argument("<agent-id>", "Agent ID")
-		.requiredOption("--types <types>", "Comma-separated message types")
 		.action(
-			withClient(
-				program,
-				async ({ client, gOpts }, agentId: string, opts: { types: string }) => {
-					const types = opts.types.split(",").map((t) => t.trim());
-					const result = await updateCard(client, agentId, (card) =>
-						setRineField(card, "message_types_accepted", types),
-					);
-					if (gOpts.json) {
-						printJson(result);
-					} else {
-						printSuccess("Accept types updated");
-					}
-				},
-			),
+			withClient(program, async ({ client, gOpts }, agentId: string) => {
+				const result = await updateCard(client, agentId, (card) =>
+					setRineField(card, "a2a_enabled", true),
+				);
+				if (gOpts.json) {
+					printJson(result);
+					return;
+				}
+				const rine =
+					(result.rine as Record<string, unknown> | undefined) ?? {};
+				const endpoint = rine.a2a_endpoint;
+				if (endpoint) {
+					printSuccess(`A2A enabled. Endpoint: ${endpoint}`);
+				} else {
+					printSuccess("A2A enabled (endpoint not yet set by server)");
+				}
+			}),
+		);
+
+	agent
+		.command("disable-a2a")
+		.description("Disable A2A protocol bridge for this agent")
+		.argument("<agent-id>", "Agent ID")
+		.action(
+			withClient(program, async ({ client, gOpts }, agentId: string) => {
+				await updateCard(client, agentId, (card) =>
+					setRineField(card, "a2a_enabled", false),
+				);
+				printMutationOk("A2A disabled", gOpts.json);
+			}),
 		);
 }
