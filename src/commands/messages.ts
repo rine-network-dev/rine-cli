@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
-import type { Command } from "commander";
-import { withClient } from "../action.js";
 import {
+	type GroupRead,
+	type HttpClient,
+	type ListResponse,
 	type MessageRead,
 	type PaginatedResponse,
 	RineApiError,
@@ -10,13 +11,18 @@ import {
 	decryptMessage,
 	encryptGroupMessage,
 	encryptMessage,
+	encryptMlsGroupMessage,
 	fetchAgents,
-	fetchRecipientEncryptionKey,
+	fetchRecipientKeys,
 	ingestSenderKeyDistribution,
 	normalizeHandle,
+	processMlsWelcomes,
 	resolveAgent,
 	resolveToUuid,
+	syncMlsGroup,
 } from "@rine-network/core";
+import type { Command } from "commander";
+import { withClient } from "../action.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import {
 	fetchAndIngestPendingSKDistributions,
@@ -92,6 +98,59 @@ function resolvePayload(
 	}
 }
 
+async function resolveGroup(
+	client: HttpClient,
+	handle: string,
+): Promise<GroupRead> {
+	const list = (await client.get("/groups", {
+		handle,
+	})) as ListResponse<GroupRead>;
+	const group = list.items?.[0];
+	if (!group) throw new Error(`Group not found: ${handle}`);
+	return group;
+}
+
+// MLS group send: always sync to the latest epoch before encrypting so that
+// newer members (who joined via external commit) can decrypt.  If no local
+// state exists yet, install pending welcomes + sync, then encrypt.
+async function encryptMlsWithRecovery(
+	client: HttpClient,
+	configDir: string,
+	senderAgentId: string,
+	groupId: string,
+	payload: unknown,
+): Promise<ReturnType<typeof encryptMlsGroupMessage>> {
+	const hdrs = { "X-Rine-Agent": senderAgentId };
+	// Pre-sync: advance local epoch so we encrypt at the group's current state.
+	// Failures are non-fatal — the "No MLS state" recovery below handles them.
+	await processMlsWelcomes(configDir, senderAgentId, client).catch(() => {});
+	await syncMlsGroup(configDir, senderAgentId, groupId, client, hdrs).catch(() => {});
+
+	try {
+		return await encryptMlsGroupMessage(
+			configDir,
+			senderAgentId,
+			groupId,
+			payload,
+		);
+	} catch (err) {
+		if (
+			err instanceof Error &&
+			err.message.startsWith("No MLS state for group")
+		) {
+			await processMlsWelcomes(configDir, senderAgentId, client);
+			await syncMlsGroup(configDir, senderAgentId, groupId, client, hdrs);
+			return await encryptMlsGroupMessage(
+				configDir,
+				senderAgentId,
+				groupId,
+				payload,
+			);
+		}
+		throw err;
+	}
+}
+
 function addMessageCommands(parent: Command, program: Command): void {
 	parent
 		.command("send")
@@ -102,7 +161,10 @@ function addMessageCommands(parent: Command, program: Command): void {
 		)
 		.option("--type <type>", "Message type (default: rine.v1.dm)")
 		.option("--payload <json>", "Message payload as JSON string")
-		.option("--payload-file <path>", "Read payload JSON from file (use - for stdin)")
+		.option(
+			"--payload-file <path>",
+			"Read payload JSON from file (use - for stdin)",
+		)
 		.option("--from <address>", "Sender: agent handle (agent@org) or agent ID")
 		.option("--idempotency-key <key>", "Idempotency key header")
 		.action(
@@ -138,11 +200,21 @@ function addMessageCommands(parent: Command, program: Command): void {
 						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else if (!gOpts.as) {
 						const agents = await fetchAgents(client);
-						senderAgentId = await resolveAgent(apiUrl, agents, undefined, undefined);
+						senderAgentId = await resolveAgent(
+							apiUrl,
+							agents,
+							undefined,
+							undefined,
+						);
 						extraHeaders["X-Rine-Agent"] = senderAgentId;
 					} else {
 						const agents = await fetchAgents(client);
-						senderAgentId = await resolveAgent(apiUrl, agents, undefined, gOpts.as);
+						senderAgentId = await resolveAgent(
+							apiUrl,
+							agents,
+							undefined,
+							gOpts.as,
+						);
 					}
 
 					if (opts.idempotencyKey) {
@@ -174,39 +246,53 @@ function addMessageCommands(parent: Command, program: Command): void {
 					const isGroupSend = to.startsWith("#");
 
 					if (isGroupSend && senderAgentId) {
-						// Group send: use sender-key encryption
-						const { state, groupId } = await getOrCreateSenderKey(
-							client,
-							configDir,
-							senderAgentId,
-							to,
-							Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
-						);
-						const { result: encResult } = await encryptGroupMessage(
-							configDir,
-							senderAgentId,
-							groupId,
-							state,
-							parsedPayload,
-						);
-						Object.assign(body, encResult);
+						const group = await resolveGroup(client, to);
+						if (group.mls_group_id) {
+							// MLS-active group: use MLS encryption (keyed by rine group UUID)
+							const encResult = await encryptMlsWithRecovery(
+								client,
+								configDir,
+								senderAgentId,
+								group.id,
+								parsedPayload,
+							);
+							Object.assign(body, encResult);
+						} else {
+							// Sender-key group: use sender-key encryption
+							const { state, groupId } = await getOrCreateSenderKey(
+								client,
+								configDir,
+								senderAgentId,
+								to,
+								Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+							);
+							const { result: encResult } = await encryptGroupMessage(
+								configDir,
+								senderAgentId,
+								groupId,
+								state,
+								parsedPayload,
+							);
+							Object.assign(body, encResult);
+						}
 					} else if (senderAgentId && recipientAgentId) {
-						// Direct send: use HPKE encryption
-						const recipientPk = await fetchRecipientEncryptionKey(
+						// Direct send: use HPKE encryption (hybrid PQ when available)
+						const recipientKeys = await fetchRecipientKeys(
 							client,
 							recipientAgentId,
 						);
 						const encrypted = await encryptMessage(
 							configDir,
 							senderAgentId,
-							recipientPk,
+							recipientKeys.encryption,
 							parsedPayload,
+							recipientKeys.pqEncryption,
 						);
 						Object.assign(body, encrypted);
 					} else {
 						throw new Error(
 							"Cannot encrypt: unable to resolve sender or recipient. " +
-							"Use UUIDs or ensure WebFinger is available.",
+								"Use UUIDs or ensure WebFinger is available.",
 						);
 					}
 
@@ -243,18 +329,28 @@ function addMessageCommands(parent: Command, program: Command): void {
 					)) as MessageRead;
 
 					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+					const agentId = await resolveAgent(
+						apiUrl,
+						agents,
+						opts.agent,
+						gOpts.as,
+					);
 
 					const canDecrypt =
 						(data.encryption_version === "hpke-v1" ||
-							data.encryption_version === "sender-key-v1") &&
+							data.encryption_version === "hpke-hybrid-v1" ||
+							data.encryption_version === "sender-key-v1" ||
+							data.encryption_version === "mls-v1") &&
 						agentKeysExist(configDir, agentId);
 
 					if (canDecrypt) {
-						let decResult: Awaited<ReturnType<typeof decryptMessage>> | undefined;
+						let decResult:
+							| Awaited<ReturnType<typeof decryptMessage>>
+							| undefined;
 
 						if (
-							data.encryption_version === "sender-key-v1" &&
+							(data.encryption_version === "sender-key-v1" ||
+								data.encryption_version === "mls-v1") &&
 							data.group_id
 						) {
 							try {
@@ -271,13 +367,12 @@ function addMessageCommands(parent: Command, program: Command): void {
 									err instanceof Error &&
 									err.message.match(/^unknown sender key id: (.+)$/);
 								if (match) {
-									const ingested =
-										await fetchAndIngestPendingSKDistributions(
-											client,
-											configDir,
-											agentId,
-											match[1],
-										);
+									const ingested = await fetchAndIngestPendingSKDistributions(
+										client,
+										configDir,
+										agentId,
+										match[1],
+									);
 									if (ingested > 0) {
 										try {
 											decResult = await decryptGroupMessage(
@@ -295,9 +390,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 											}
 										}
 									} else if (!gOpts.json) {
-										printError(
-											`Decryption failed: ${err.message}`,
-										);
+										printError(`Decryption failed: ${err.message}`);
 									}
 								} else if (!gOpts.json) {
 									printError(
@@ -323,7 +416,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 						}
 
 						if (decResult) {
-							if (ingestSenderKeyDistribution(configDir, agentId, data.type, decResult)) {
+							if (
+								ingestSenderKeyDistribution(
+									configDir,
+									agentId,
+									data.type,
+									decResult,
+								)
+							) {
 								printText("Sender key ingested");
 							}
 
@@ -344,7 +444,12 @@ function addMessageCommands(parent: Command, program: Command): void {
 										To: msgTo(data),
 										Group: msgGroup(data),
 										Type: data.type,
-										Verified: decResult.verificationStatus === "verified" ? "\u2713" : decResult.verificationStatus === "invalid" ? "\u2717 INVALID" : "?",
+										Verified:
+											decResult.verificationStatus === "verified"
+												? "\u2713"
+												: decResult.verificationStatus === "invalid"
+													? "\u2717 INVALID"
+													: "?",
 										Payload: decResult.plaintext.slice(0, 200),
 										Created: data.created_at,
 									},
@@ -390,15 +495,29 @@ function addMessageCommands(parent: Command, program: Command): void {
 				program,
 				async (
 					{ client, gOpts, apiUrl },
-					opts: { agent?: string; new?: boolean; delivered?: boolean; read?: boolean; limit?: string; cursor?: string },
+					opts: {
+						agent?: string;
+						new?: boolean;
+						delivered?: boolean;
+						read?: boolean;
+						limit?: string;
+						cursor?: string;
+					},
 				) => {
 					const flags = [opts.new, opts.delivered, opts.read].filter(Boolean);
 					if (flags.length > 1) {
-						throw new Error("Only one of --new, --delivered, --read can be specified");
+						throw new Error(
+							"Only one of --new, --delivered, --read can be specified",
+						);
 					}
 
 					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+					const agentId = await resolveAgent(
+						apiUrl,
+						agents,
+						opts.agent,
+						gOpts.as,
+					);
 
 					const params: Record<string, string | number | boolean> = {};
 					if (opts.new) params.status = "new";
@@ -430,7 +549,10 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.argument("<message-id>", "Message ID to reply to")
 		.option("--type <type>", "Message type (defaults to original message type)")
 		.option("--payload <json>", "Reply payload as JSON string")
-		.option("--payload-file <path>", "Read payload JSON from file (use - for stdin)")
+		.option(
+			"--payload-file <path>",
+			"Read payload JSON from file (use - for stdin)",
+		)
 		.action(
 			withClient(
 				program,
@@ -453,7 +575,12 @@ function addMessageCommands(parent: Command, program: Command): void {
 					)) as MessageRead;
 
 					const agents = await fetchAgents(client);
-					const senderAgentId = await resolveAgent(apiUrl, agents, undefined, gOpts.as);
+					const senderAgentId = await resolveAgent(
+						apiUrl,
+						agents,
+						undefined,
+						gOpts.as,
+					);
 
 					if (original.from_agent_id === senderAgentId) {
 						console.error(
@@ -470,21 +597,25 @@ function addMessageCommands(parent: Command, program: Command): void {
 					try {
 						const body: Record<string, unknown> = { type: resolvedType };
 
-						if (!recipientAgentId || !agentKeysExist(configDir, senderAgentId)) {
+						if (
+							!recipientAgentId ||
+							!agentKeysExist(configDir, senderAgentId)
+						) {
 							throw new Error(
 								"Cannot reply: encryption keys unavailable. " +
-								"Run 'rine keys generate' first.",
+									"Run 'rine keys generate' first.",
 							);
 						}
-						const recipientPk = await fetchRecipientEncryptionKey(
+						const recipientKeys = await fetchRecipientKeys(
 							client,
 							recipientAgentId,
 						);
 						const encrypted = await encryptMessage(
 							configDir,
 							senderAgentId,
-							recipientPk,
+							recipientKeys.encryption,
 							parsedPayload,
+							recipientKeys.pqEncryption,
 						);
 						Object.assign(body, encrypted);
 

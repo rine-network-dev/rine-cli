@@ -1,15 +1,21 @@
-import type { Command } from "commander";
-import { withClient } from "../action.js";
 import {
 	type GroupMemberRead,
 	type GroupRead,
+	type HttpClient,
 	type JoinRequestRead,
 	type ListResponse,
 	type VoteResponse,
+	addMlsGroupMember,
+	externalJoinMlsGroup,
 	fetchAgents,
+	initMlsGroup,
+	loadMlsState,
+	processMlsWelcomes,
 	resolveAgent,
 	resolveToUuid,
 } from "@rine-network/core";
+import type { Command } from "commander";
+import { withClient } from "../action.js";
 import {
 	printError,
 	printJson,
@@ -18,6 +24,88 @@ import {
 	printText,
 } from "../output.js";
 import { promptConfirm } from "../prompt.js";
+
+// Best-effort: fetch & install pending MLS Welcomes for a freshly-added member.
+async function installWelcomes(
+	client: HttpClient,
+	configDir: string,
+	agentId: string,
+	json?: boolean,
+): Promise<void> {
+	try {
+		await processMlsWelcomes(configDir, agentId, client);
+	} catch (err) {
+		if (!json) {
+			printText(
+				`Warning: MLS welcome install failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
+
+// Best-effort open-enrollment fallback (Phase 6): when the joiner became a rine
+// member with no Welcome (the `open` enrollment case — no admin in the loop), and
+// the group is MLS-active, self-join via an RFC 9420 external commit so the joiner
+// becomes a real MLS member able to send/receive. No-op if a Welcome already
+// installed local MLS state, or for non-MLS (sender-key) groups.
+async function selfJoinViaExternalCommit(
+	client: HttpClient,
+	configDir: string,
+	groupId: string,
+	agentId: string,
+	json?: boolean,
+): Promise<void> {
+	try {
+		const group = (await client.get(`/groups/${groupId}`)) as GroupRead;
+		if (!group.mls_group_id) return;
+		// A Welcome may have just installed state — only self-join if none exists.
+		if (loadMlsState(configDir, agentId, groupId)) return;
+		await externalJoinMlsGroup(configDir, agentId, groupId, client, {
+			"X-Rine-Agent": agentId,
+		});
+	} catch (err) {
+		if (!json) {
+			printText(
+				`Warning: MLS self-join failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
+
+// Best-effort: if the group is MLS-active, add a member (claim KP, commit,
+// deliver Welcome) as the acting admin. No-op for sender-key groups.
+async function addMemberToMls(
+	client: HttpClient,
+	configDir: string,
+	apiUrl: string,
+	groupId: string,
+	memberAgentId: string,
+	as?: string,
+	json?: boolean,
+): Promise<void> {
+	try {
+		const group = (await client.get(`/groups/${groupId}`)) as GroupRead;
+		if (!group.mls_group_id) return;
+		const agents = await fetchAgents(client);
+		const adminId = await resolveAgent(apiUrl, agents, undefined, as);
+		await addMlsGroupMember(
+			configDir,
+			adminId,
+			groupId,
+			memberAgentId,
+			client,
+			{
+				"X-Rine-Agent": adminId,
+			},
+		);
+	} catch (err) {
+		if (!json) {
+			printText(
+				`Warning: MLS add-member failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
 
 function groupRow(g: GroupRead): Record<string, unknown> {
 	return {
@@ -84,7 +172,7 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, configDir, apiUrl },
 					opts: {
 						name: string;
 						enrollment?: string;
@@ -112,6 +200,28 @@ export function registerGroup(program: Command): void {
 						body.vote_duration_hours = Number(opts.voteDuration);
 
 					const data = (await client.post("/groups", body)) as GroupRead;
+
+					// Best-effort: latch MLS for the new group (creator-only init).
+					// New groups default to mls_enabled=true server-side.
+					try {
+						const agents = await fetchAgents(client);
+						const actingAgentId = await resolveAgent(
+							apiUrl,
+							agents,
+							undefined,
+							gOpts.as,
+						);
+						await initMlsGroup(configDir, actingAgentId, data.id, client, {
+							"X-Rine-Agent": actingAgentId,
+						});
+					} catch (err) {
+						if (!gOpts.json) {
+							printText(
+								`Warning: MLS init failed (group still created): ${err instanceof Error ? err.message : String(err)}`,
+							);
+						}
+					}
+
 					if (gOpts.json) {
 						printJson(data);
 					} else {
@@ -248,7 +358,7 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, configDir },
 					groupId: string,
 					opts: { message?: string },
 				) => {
@@ -258,6 +368,21 @@ export function registerGroup(program: Command): void {
 					const data = (await client.post(`/groups/${groupId}/join`, body)) as
 						| GroupMemberRead
 						| JoinRequestRead;
+					if ("role" in data) {
+						// Immediate membership: install any pending MLS Welcome so the
+						// joiner can decrypt/send. Best-effort (non-fatal on failure).
+						await installWelcomes(client, configDir, data.agent_id, gOpts.json);
+						// Open-enrollment fallback: if the group is MLS-active but no
+						// Welcome arrived (no admin minted one), self-join via an external
+						// commit. Best-effort, runs only when no local state exists.
+						await selfJoinViaExternalCommit(
+							client,
+							configDir,
+							groupId,
+							data.agent_id,
+							gOpts.json,
+						);
+					}
 					if (gOpts.json) {
 						printJson(data);
 					} else if ("role" in data) {
@@ -285,7 +410,12 @@ export function registerGroup(program: Command): void {
 					opts: { agent?: string },
 				) => {
 					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+					const agentId = await resolveAgent(
+						apiUrl,
+						agents,
+						opts.agent,
+						gOpts.as,
+					);
 					await client.delete(`/groups/${groupId}/members/${agentId}`);
 					printMutationOk("Left group", gOpts.json);
 				},
@@ -318,7 +448,7 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, apiUrl },
+					{ client, gOpts, configDir, apiUrl },
 					groupId: string,
 					opts: { agent: string; message?: string },
 				) => {
@@ -330,6 +460,20 @@ export function registerGroup(program: Command): void {
 						`/groups/${groupId}/invite`,
 						body,
 					)) as JoinRequestRead;
+
+					// For MLS-active groups, add the invitee now (claims their KP and
+					// delivers a Welcome) so it's waiting when they accept the invite via
+					// `join`. Best-effort, acting as the inviting admin.
+					await addMemberToMls(
+						client,
+						configDir,
+						apiUrl,
+						groupId,
+						agentId,
+						gOpts.as,
+						gOpts.json,
+					);
+
 					if (gOpts.json) {
 						printJson(data);
 					} else {
@@ -369,7 +513,7 @@ export function registerGroup(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts },
+					{ client, gOpts, configDir, apiUrl },
 					groupId: string,
 					requestId: string,
 					opts: { vote: string },
@@ -379,12 +523,39 @@ export function registerGroup(program: Command): void {
 						process.exitCode = 2;
 						return;
 					}
+
+					// Capture the applicant before voting — once approved the request
+					// leaves the pending list and the agent_id is no longer queryable.
+					let applicantId: string | undefined;
+					if (opts.vote === "approve") {
+						const reqs = (await client.get(
+							`/groups/${groupId}/requests`,
+						)) as ListResponse<JoinRequestRead>;
+						applicantId = reqs.items.find((r) => r.id === requestId)?.agent_id;
+					}
+
 					const data = (await client.post(
 						`/groups/${groupId}/requests/${requestId}/vote`,
 						{
 							vote: opts.vote,
 						},
 					)) as VoteResponse;
+
+					// If this vote crossed the approval threshold, the applicant is now
+					// a member — add them to the MLS group as the acting admin so their
+					// Welcome is delivered. Best-effort (non-fatal on failure).
+					if (data.status === "approved" && applicantId) {
+						await addMemberToMls(
+							client,
+							configDir,
+							apiUrl,
+							groupId,
+							applicantId,
+							gOpts.as,
+							gOpts.json,
+						);
+					}
+
 					if (gOpts.json) {
 						printJson(data);
 					} else {

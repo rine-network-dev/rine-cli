@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { withClient, withErrorHandler } from "../action.js";
 import {
+	type AgentKeys,
 	type AgentKeysResponse,
 	type AgentRead,
 	type ListResponse,
@@ -11,11 +12,13 @@ import {
 	fetchAgents,
 	fromBase64Url,
 	generateAgentKeys,
+	generatePqKeyPair,
 	getAgentPublicKeys,
 	loadAgentKeys,
 	resolveAgent,
 	resolveConfigDir,
 	saveAgentKeys,
+	savePqEncryptionKey,
 	toBase64Url,
 	validateEncryptionKey,
 	validateSigningKey,
@@ -26,6 +29,7 @@ interface KeyExport {
 	agent_id: string;
 	signing_private_key: string;
 	encryption_private_key: string;
+	pq_encryption_private_key?: string;
 }
 
 function getKeysDir(configDir: string, agentId: string): string {
@@ -35,7 +39,7 @@ function getKeysDir(configDir: string, agentId: string): string {
 function backupKeys(configDir: string, agentId: string): void {
 	const dir = getKeysDir(configDir, agentId);
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
-	for (const name of ["signing.key", "encryption.key"]) {
+	for (const name of ["signing.key", "encryption.key", "pq_encryption.key"]) {
 		const src = join(dir, name);
 		if (!fs.existsSync(src)) continue;
 		// Remove older backups of this key, keep only the new one
@@ -51,7 +55,11 @@ function backupKeys(configDir: string, agentId: string): void {
 async function verifyServerKeys(
 	client: { get: (url: string) => Promise<unknown> },
 	agentId: string,
-	expected: { signing_public_key: { x: string }; encryption_public_key: { x: string } },
+	expected: {
+		signing_public_key: { x: string };
+		encryption_public_key: { x: string };
+		pq_encryption_public_key?: { x: string };
+	},
 ): Promise<void> {
 	const server = (await client.get(`/agents/${agentId}/keys`)) as AgentKeysResponse;
 	if (
@@ -60,6 +68,14 @@ async function verifyServerKeys(
 	) {
 		throw new Error(
 			"Server key verification failed: uploaded keys do not match. Old keys preserved locally.",
+		);
+	}
+	if (
+		expected.pq_encryption_public_key &&
+		server.pq_encryption_public_key?.x !== expected.pq_encryption_public_key.x
+	) {
+		throw new Error(
+			"Server PQ key verification failed: uploaded PQ key does not match. Old keys preserved locally.",
 		);
 	}
 }
@@ -99,6 +115,7 @@ export function registerKeys(program: Command): void {
 
 					let sigFingerprint = "-";
 					let encFingerprint = "-";
+					let pqFingerprint = "-";
 
 					if (hasLocal) {
 						const agentKeys = loadAgentKeys(configDir, agentId);
@@ -106,10 +123,19 @@ export function registerKeys(program: Command): void {
 						encFingerprint = toBase64Url(
 							agentKeys.encryption.publicKey,
 						).slice(0, 8);
+						if (agentKeys.pqEncryption) {
+							pqFingerprint = toBase64Url(
+								agentKeys.pqEncryption.publicKey,
+							).slice(0, 8);
+						}
 					} else if (serverKeys) {
 						sigFingerprint = serverKeys.signing_public_key.x.slice(0, 8);
 						encFingerprint =
 							serverKeys.encryption_public_key.x.slice(0, 8);
+						if (serverKeys.pq_encryption_public_key) {
+							pqFingerprint =
+								serverKeys.pq_encryption_public_key.x.slice(0, 8);
+						}
 					}
 
 					const keysLabel = hasLocal && hasServer
@@ -130,6 +156,8 @@ export function registerKeys(program: Command): void {
 								sigFingerprint !== "-" ? sigFingerprint : null,
 							encryption_fingerprint:
 								encFingerprint !== "-" ? encFingerprint : null,
+							pq_encryption_fingerprint:
+								pqFingerprint !== "-" ? pqFingerprint : null,
 						});
 					} else {
 						printTable([
@@ -145,6 +173,10 @@ export function registerKeys(program: Command): void {
 							{
 								Field: "Encryption Fingerprint",
 								Value: encFingerprint,
+							},
+							{
+								Field: "PQ Encryption Fingerprint",
+								Value: pqFingerprint,
 							},
 						]);
 					}
@@ -212,6 +244,51 @@ export function registerKeys(program: Command): void {
 		);
 
 	keys
+		.command("add-pq")
+		.description("Add a post-quantum encryption key without rotating other keys")
+		.option("--agent <id>", "Agent ID")
+		.action(
+			withClient(
+				program,
+				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+
+					if (!agentKeysExist(configDir, agentId)) {
+						printError(
+							`No keys found for agent ${agentId}. Use 'rine keys generate' first.`,
+						);
+						process.exitCode = 1;
+						return;
+					}
+
+					const existingKeys = loadAgentKeys(configDir, agentId);
+					if (existingKeys.pqEncryption) {
+						printError(
+							`Agent ${agentId} already has a post-quantum key. Use 'rine keys rotate' to replace all keys.`,
+						);
+						process.exitCode = 1;
+						return;
+					}
+
+					backupKeys(configDir, agentId);
+
+					const pqKeyPair = generatePqKeyPair();
+					const keysWithPq: AgentKeys = { ...existingKeys, pqEncryption: pqKeyPair };
+					const pubKeys = getAgentPublicKeys(configDir, agentId, keysWithPq);
+					await client.post(`/agents/${agentId}/keys`, pubKeys);
+					await verifyServerKeys(client, agentId, pubKeys);
+					savePqEncryptionKey(configDir, agentId, pqKeyPair);
+
+					printMutationOk(
+						`Post-quantum encryption key added for agent ${agentId}`,
+						gOpts.json,
+					);
+				},
+			),
+		);
+
+	keys
 		.command("export")
 		.description("Export private keys to a file")
 		.option("--agent <id>", "Agent ID")
@@ -237,6 +314,11 @@ export function registerKeys(program: Command): void {
 							agentKeys.encryption.privateKey,
 						),
 					};
+					if (agentKeys.pqEncryption) {
+						exported.pq_encryption_private_key = toBase64Url(
+							agentKeys.pqEncryption.privateKey,
+						);
+					}
 
 					fs.writeFileSync(opts.output, JSON.stringify(exported, null, 2));
 					fs.chmodSync(opts.output, 0o600);
@@ -286,6 +368,15 @@ export function registerKeys(program: Command): void {
 					return;
 				}
 
+				if (data.pq_encryption_private_key) {
+					const pqBytes = fromBase64Url(data.pq_encryption_private_key);
+					if (pqBytes.length !== 2400) {
+						printError(`Invalid PQ encryption key: expected 2400 bytes, got ${pqBytes.length}`);
+						process.exitCode = 2;
+						return;
+					}
+				}
+
 				const configDir = resolveConfigDir();
 				const dir = join(configDir, "keys", data.agent_id);
 				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -297,6 +388,12 @@ export function registerKeys(program: Command): void {
 				const encPath = join(dir, "encryption.key");
 				fs.writeFileSync(encPath, data.encryption_private_key, "utf-8");
 				fs.chmodSync(encPath, 0o600);
+
+				if (data.pq_encryption_private_key) {
+					const pqPath = join(dir, "pq_encryption.key");
+					fs.writeFileSync(pqPath, data.pq_encryption_private_key, "utf-8");
+					fs.chmodSync(pqPath, 0o600);
+				}
 
 				printMutationOk(`Keys imported for agent ${data.agent_id}`, gOpts.json);
 			}),
