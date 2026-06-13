@@ -9,10 +9,12 @@ import {
 	externalJoinMlsGroup,
 	fetchAgents,
 	initMlsGroup,
+	listMyInvites,
 	loadMlsState,
 	processMlsWelcomes,
 	resolveAgent,
 	resolveToUuid,
+	sendGroupInviteNotification,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
@@ -107,6 +109,44 @@ async function addMemberToMls(
 	}
 }
 
+// Best-effort: seal a rine.v1.group_invite DM to the invitee so their normal
+// inbox alerts them. The authoritative discovery path is `GET /groups/invites`
+// (the `group invites` command), so a failure here (e.g. groups_only 403,
+// missing keys) warns but never fails the invite. Mirrors addMemberToMls.
+async function sendInviteNotification(
+	client: HttpClient,
+	configDir: string,
+	apiUrl: string,
+	groupId: string,
+	inviteeAgentId: string,
+	message?: string,
+	as?: string,
+	json?: boolean,
+): Promise<void> {
+	try {
+		const group = (await client.get(`/groups/${groupId}`)) as GroupRead;
+		const agents = await fetchAgents(client);
+		const inviterId = await resolveAgent(apiUrl, agents, undefined, as);
+		await sendGroupInviteNotification(
+			client,
+			configDir,
+			inviterId,
+			inviteeAgentId,
+			{
+				group_id: groupId,
+				group_handle: group.handle,
+				message: message ?? null,
+			},
+		);
+	} catch (err) {
+		if (!json) {
+			printText(
+				`Warning: invite notification failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
+
 function groupRow(g: GroupRead): Record<string, unknown> {
 	return {
 		ID: g.id,
@@ -150,6 +190,18 @@ function requestRow(r: JoinRequestRead): Record<string, unknown> {
 		Message: r.message ?? "",
 		"Your Vote": r.your_vote ?? "",
 		Expires: r.expires_at ?? "",
+		Created: r.created_at,
+	};
+}
+
+// The invitee's perspective: who invited you, to which group. Distinct from
+// requestRow, whose `Your Vote`/`Agent ID` columns are voter-scoped.
+function inviteRow(r: JoinRequestRead): Record<string, unknown> {
+	return {
+		Group: r.group_handle ?? r.group_name ?? "",
+		"Group ID": r.group_id,
+		"Invited By": r.invited_by ?? "",
+		Message: r.message ?? "",
 		Created: r.created_at,
 	};
 }
@@ -474,6 +526,20 @@ export function registerGroup(program: Command): void {
 						gOpts.json,
 					);
 
+					// Nudge the invitee's inbox with a sealed rine.v1.group_invite DM so
+					// they discover the invite. Authoritative path is `group invites`;
+					// this is best-effort (warn-only, never fatal).
+					await sendInviteNotification(
+						client,
+						configDir,
+						apiUrl,
+						groupId,
+						agentId,
+						opts.message,
+						gOpts.as,
+						gOpts.json,
+					);
+
 					if (gOpts.json) {
 						printJson(data);
 					} else {
@@ -499,6 +565,20 @@ export function registerGroup(program: Command): void {
 					printJson(data);
 				} else {
 					printTable(data.items.map(requestRow));
+				}
+			}),
+		);
+
+	group
+		.command("invites")
+		.description("List group invitations addressed to you")
+		.action(
+			withClient(program, async ({ client, gOpts, extraHeaders }) => {
+				const items = await listMyInvites(client, extraHeaders);
+				if (gOpts.json) {
+					printJson(items);
+				} else {
+					printTable(items.map(inviteRow));
 				}
 			}),
 		);
