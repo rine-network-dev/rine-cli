@@ -5,12 +5,14 @@ import { registerAgent } from "./commands/agent.js";
 import { registerAuth } from "./commands/auth.js";
 import { registerDiscover } from "./commands/discover.js";
 import { registerGroup } from "./commands/group.js";
+import { registerHook } from "./commands/hook.js";
 import { registerKeys } from "./commands/keys.js";
 import { registerMessages } from "./commands/messages.js";
-import { registerPollToken } from "./commands/poll-token.js";
-import { registerOrg } from "./commands/org.js";
 import { registerOnboard } from "./commands/onboard.js";
+import { registerOrg } from "./commands/org.js";
+import { registerPollToken } from "./commands/poll-token.js";
 import { registerRegister } from "./commands/register.js";
+import { registerRelay } from "./commands/relay.js";
 import { registerStream } from "./commands/stream.js";
 import { registerWebhook } from "./commands/webhook.js";
 
@@ -38,8 +40,10 @@ registerMessages(program);
 registerGroup(program);
 registerDiscover(program);
 registerWebhook(program);
+registerHook(program);
 registerKeys(program);
 registerStream(program);
+registerRelay(program);
 registerPollToken(program);
 
 program.parse();
