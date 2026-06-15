@@ -15,6 +15,7 @@ import {
 	resolveConfigDir,
 } from "@rine-network/core";
 import { fetchAndIngestPendingSKDistributions } from "./sender-key-ops.js";
+import { loadStreamCursor, saveStreamCursor } from "./stream-cursor.js";
 import { printError } from "../output.js";
 import type { GlobalOpts } from "../types.js";
 
@@ -146,7 +147,9 @@ export function registerStream(program: Command): void {
 
 				const heartbeatTimeoutMs = Math.max(Number(opts.heartbeatTimeout) || 70, 10) * 1000;
 
-				let lastEventId: string | undefined;
+				// Resume from the persisted cursor so a fresh process reconnects
+				// from the last-seen event instead of cursorless (REQ-SSE-05).
+				let lastEventId: string | undefined = loadStreamCursor(configDir, agentId);
 				let backoff = 1;
 				let attempt = 0;
 				let stopped = false;
@@ -199,7 +202,10 @@ export function registerStream(program: Command): void {
 								onMessage: ({ event, data, id }) => {
 									resetHeartbeatTimer();
 
-									if (id) lastEventId = id;
+									if (id) {
+										lastEventId = id;
+										saveStreamCursor(configDir, agentId, id);
+									}
 
 									if (gOpts.json) {
 										if (!opts.monitor || event === "message") {

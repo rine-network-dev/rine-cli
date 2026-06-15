@@ -33,11 +33,19 @@ vi.mock("../src/commands/sender-key-ops.js", () => ({
 	fetchAndIngestPendingSKDistributions: vi.fn(async () => 0),
 }));
 
+vi.mock("../src/commands/stream-cursor.js", () => ({
+	loadStreamCursor: vi.fn(() => undefined),
+	saveStreamCursor: vi.fn(),
+}));
+
 import { createEventSource } from "eventsource-client";
 import { Command } from "commander";
 import { registerStream } from "../src/commands/stream.js";
+import { loadStreamCursor, saveStreamCursor } from "../src/commands/stream-cursor.js";
 
 const mockCreateEventSource = vi.mocked(createEventSource);
+const mockLoadCursor = vi.mocked(loadStreamCursor);
+const mockSaveCursor = vi.mocked(saveStreamCursor);
 
 function makeProgram(): Command {
 	const program = new Command();
@@ -96,6 +104,9 @@ describe("rine stream", () => {
 	beforeEach(() => {
 		installSigintCapture();
 		process.exitCode = undefined;
+		mockLoadCursor.mockReset();
+		mockLoadCursor.mockReturnValue(undefined);
+		mockSaveCursor.mockReset();
 		mockCreateEventSource.mockImplementation(makeMockEs(() => {
 			Promise.resolve().then(() => fireSigint());
 		}));
@@ -529,6 +540,72 @@ describe("rine stream", () => {
 
 			const connectMsg = stderr.lines.find((l) => l.includes("Connected to stream"));
 			expect(connectMsg).toBeDefined();
+		});
+	});
+
+	describe("cursor persistence (REQ-SSE-05)", () => {
+		it("loads the persisted cursor for the resolved agent on startup", async () => {
+			mockCreateEventSource.mockImplementationOnce(makeMockEs(() => {
+				Promise.resolve().then(() => fireSigint());
+			}));
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream"]);
+
+			expect(mockLoadCursor).toHaveBeenCalledWith("/fake/config", "agent-1");
+		});
+
+		it("sends the persisted Last-Event-ID on a fresh (restarted) connect", async () => {
+			mockLoadCursor.mockReturnValueOnce("persisted-evt-9");
+
+			let capturedHeaders: Record<string, string> = {};
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				capturedHeaders = opts.headers;
+				const es = { close: vi.fn() };
+				Promise.resolve().then(() => fireSigint());
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream"]);
+
+			expect(capturedHeaders["Last-Event-ID"]).toBe("persisted-evt-9");
+		});
+
+		it("persists the cursor when a message with an id arrives", async () => {
+			let onMsg: ((msg: any) => void) | undefined;
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				onMsg = opts.onMessage;
+				Promise.resolve().then(() => {
+					onMsg!({ event: "message", data: '{"type":"rine.v1.dm"}', id: "evt-77" });
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json"]);
+
+			expect(mockSaveCursor).toHaveBeenCalledWith("/fake/config", "agent-1", "evt-77");
+		});
+
+		it("does not persist a heartbeat frame (no id)", async () => {
+			let onMsg: ((msg: any) => void) | undefined;
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				onMsg = opts.onMessage;
+				Promise.resolve().then(() => {
+					onMsg!({ event: "heartbeat", data: "{}", id: null });
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json"]);
+
+			expect(mockSaveCursor).not.toHaveBeenCalled();
 		});
 	});
 });
