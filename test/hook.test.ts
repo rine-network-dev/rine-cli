@@ -39,6 +39,7 @@ function hookCreated(
 	return {
 		hook_name: "github",
 		hostname: HOSTNAME,
+		termination: "zero_trust",
 		active: true,
 		created_at: "2026-06-13T00:00:00Z",
 		agent_id: AGENT_ID,
@@ -136,9 +137,11 @@ describe("rine hook create — client-side secret never sent to rine (REQ-CLI-02
 		]);
 
 		expect(post).toHaveBeenCalledTimes(1);
-		// The body must carry the name and NOTHING that looks like a secret.
+		// The body carries the name + the termination tier (null = "backend default",
+		// resolved by _default_tier_for_trust — the CLI never recomputes it, AUD-F5),
+		// and NOTHING that looks like a secret.
 		expect(postBody).toBeDefined();
-		expect(postBody).toEqual({ hook_name: "github" });
+		expect(postBody).toEqual({ hook_name: "github", tier: null });
 		expect(Object.keys(postBody as object)).not.toContain("secret");
 		// Belt-and-suspenders: no value in the body equals the generated secret.
 		expect(JSON.stringify(postBody)).not.toMatch(/[0-9a-f]{64}/);
@@ -184,7 +187,7 @@ describe("rine hook create — client-side secret never sent to rine (REQ-CLI-02
 			AGENT_ID,
 		]);
 
-		expect(postBody).toEqual({ hook_name: "default" });
+		expect(postBody).toEqual({ hook_name: "default", tier: null });
 		expect(fs.existsSync(secretPath("default"))).toBe(true);
 	});
 
@@ -320,8 +323,9 @@ describe("rine hook create — print-once setup (REQ-CLI-03)", () => {
 			.find((o) => o && typeof o === "object" && "secret" in o);
 		expect(obj).toBeTruthy();
 		expect(obj.secret).toMatch(/^[0-9a-f]{64}$/);
-		// Uses the server-returned hostname verbatim (Coupling: the `--` multi-hook form).
-		expect(obj.public_url).toBe(`https://${HOSTNAME}/github`);
+		// Payload URL is the bare host root — the hook is SNI-routed by hostname and the
+		// relay ignores the request path, so there is no redundant /{hook_name} segment.
+		expect(obj.public_url).toBe(`https://${HOSTNAME}/`);
 		expect(obj.signature_header).toBe("X-Hub-Signature-256");
 		expect(obj.content_type).toBe("application/json");
 		expect(obj.hook?.hostname ?? obj.hostname).toBe(HOSTNAME);
@@ -449,6 +453,7 @@ describe("rine hook list (REQ-CLI-05)", () => {
 				{
 					hook_name: "github",
 					hostname: HOSTNAME,
+					termination: "zero_trust",
 					active: true,
 					created_at: "2026-06-13T00:00:00Z",
 				},

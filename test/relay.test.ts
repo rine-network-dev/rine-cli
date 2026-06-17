@@ -20,7 +20,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
-const HOSTNAME = "github--bot.hook.rine.network";
+// Zero-trust hostname: TWO labels under `.hook.rine.network` — the per-hook
+// label (`github`) then the per-AGENT base32-UUID label (REQ-CERT-47), so the
+// relay keys its cert cache by the second-to-last label (the agent label), and
+// ONE `*.{agentLabel}.hook` wildcard covers every hook of the agent. The agent
+// label here is `agent_label(11111111-…)` (Crockford base32 of the UUID bytes).
+const AGENT_LABEL = "0h248h248h248h248h248h248h";
+const HOSTNAME = `github.${AGENT_LABEL}.hook.rine.network`;
 // The broker control-WS endpoint the server returns in the hook row. The relay
 // MUST dial this VERBATIM — NOT a value synthesized from the API base (which
 // resolves to the primary IP / Caddy, with no funnel route — F1).
@@ -67,6 +73,10 @@ const mockStartTlsListener = vi.fn(async () => {
 	return { close: vi.fn(), port: 8443 };
 });
 const mockAgentKeysExist = vi.fn(() => true);
+// The persisted HMAC secret the relay resolves at startup. Default: a real secret
+// so the orchestration tests run; the empty-secret fail-closed test (T1) overrides
+// it to "" to exercise the refuse-to-start guard.
+const mockLoadHookSecret = vi.fn<() => string | undefined>(() => "hook-secret");
 
 vi.mock("@rine-network/core", async (importOriginal) => {
 	const orig = await importOriginal<typeof import("@rine-network/core")>();
@@ -78,13 +88,20 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		resolveAgent: vi.fn(async () => AGENT_ID),
 		getOrRefreshToken: vi.fn(async () => "fake-token"),
 		formatError: vi.fn((e: unknown) => String(e)),
+		loadHookSecret: (...a: unknown[]) => mockLoadHookSecret(...(a as [])),
 		agentKeysExist: (...a: unknown[]) => mockAgentKeysExist(...(a as [])),
 		buildIssueCertDeps: vi.fn(async () => ({})),
 		ensureCert: (...a: unknown[]) => mockEnsureCert(...(a as [CertArgs])),
-		revokeAndWipeCache: vi.fn(async () => {}),
-		isRenewalDue: vi.fn(() => false),
 		nextBackoffDelayMs: vi.fn(() => 1000),
-		hookFqdn: vi.fn((h: string) => `${h}.hook.rine.network`),
+		// The standing renewal re-check (AUD-D2) reads cert meta and the per-agent
+		// jittered renewal trigger (REQ-CERT-46). Default: a far-future cert that is
+		// never due, so the timer never fires an overlapping ensureCert in these tests.
+		loadMeta: vi.fn(() => ({ not_after: "2099-01-01T00:00:00Z" })),
+		renewalDueWithJitter: vi.fn(() => false),
+		// `agentLabel` is the SOLE deriver of the per-agent cert-cache key — keep the
+		// REAL implementation so the C1 regression asserts the real label extraction
+		// from the server hostname (the second-to-last label before `.hook.…`).
+		agentLabel: orig.agentLabel,
 		// The mux tunnel + local TLS listener are re-exported from the rine-core
 		// package ROOT (src/index.ts → export * from "./funnel/index.js"), so the
 		// relay command imports them from "@rine-network/core" — mock them here.
@@ -94,11 +111,18 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 	};
 });
 
+// The relay asserts the per-agent wildcard A resolves before declaring the
+// listener ready (AUD-A1); default to a present A so the happy path proceeds.
+vi.mock("node:dns/promises", () => ({
+	resolve4: vi.fn(async () => ["203.0.113.7"]),
+}));
+
 // The relay resolves the SERVER-allocated hook row from the funnel-hooks list
 // (the single source of truth for the cert CN/SAN + the BIND + the broker
-// control-WS URL), so the mock client must return a hook row whose hostname is
-// the real `{hook}--{slug}` shape AND carries the server `control_ws_url` — the
-// exact values the relay binds, issues the cert for, and dials.
+// control-WS URL + the termination tier), so the mock client must return a hook
+// row whose hostname is the real two-label zero-trust `.hook` shape, carries the
+// server `control_ws_url`, AND declares `termination: zero_trust` — the exact
+// values the relay binds, issues the cert for, dials, and tier-branches on.
 vi.mock("../src/action.js", () => ({
 	createClient: vi.fn(async () => ({
 		client: {
@@ -110,6 +134,7 @@ vi.mock("../src/action.js", () => ({
 						active: true,
 						created_at: "2026-06-13T00:00:00Z",
 						control_ws_url: CONTROL_WS_URL,
+						termination: "zero_trust",
 					},
 				],
 			})),
@@ -174,6 +199,7 @@ beforeEach(() => {
 	mockConnectTunnel.mockClear();
 	mockStartTlsListener.mockClear();
 	mockAgentKeysExist.mockReturnValue(true);
+	mockLoadHookSecret.mockReturnValue("hook-secret");
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	// The tunnel connect fires its onClose to make the loop tick once then SIGINT.
 	mockConnectTunnel.mockImplementation(async () => {
@@ -229,6 +255,18 @@ describe("rine relay — fatal startup gates (REQ-CLI-06 edge cases)", () => {
 		expect(mockEnsureCert).not.toHaveBeenCalled();
 		expect(mockConnectTunnel).not.toHaveBeenCalled();
 	});
+
+	it("refuses to start (exit 2, no listener/tunnel) when no HMAC secret resolves (T1 fail-closed)", async () => {
+		// No --secret-env / --secret-file and nothing persisted ⇒ empty secret.
+		mockLoadHookSecret.mockReturnValue(undefined);
+		const program = makeProgram({});
+		await program.parseAsync(["node", "rine", "relay", "--agent", AGENT_ID]);
+		expect(process.exitCode).toBe(2);
+		// A fail-OPEN relay would still provision/listen; this must NOT.
+		expect(mockEnsureCert).not.toHaveBeenCalled();
+		expect(mockConnectTunnel).not.toHaveBeenCalled();
+		expect(mockStartTlsListener).not.toHaveBeenCalled();
+	});
 });
 
 // ── REQ-CLI-07: orchestration order ─────────────────────────────────────────
@@ -262,15 +300,18 @@ describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
 		expect(call?.options).toMatchObject({ staging: true });
 	});
 
-	it("issues the cert for the SERVER hostname's LABEL, not the agent UUID (C1 regression)", async () => {
+	it("issues the cert for the SERVER hostname's AGENT LABEL, not the agent UUID (C1 regression)", async () => {
 		const program = makeProgram({});
 		await program.parseAsync(["node", "rine", "relay", "--agent", AGENT_ID]);
-		// The cert handle must be the hostname label `github--bot` so hookFqdn(label)
-		// == the public hostname GitHub does TLS to — never the `<uuid>` (mismatch).
+		// The cert handle must be the AGENT label — the second-to-last DNS label of
+		// the zero-trust hostname (`{hook}.{agentLabel}.hook.rine.network`) — so the
+		// per-agent `*.{agentLabel}.hook` wildcard covers GitHub's TLS SNI and ONE
+		// cert serves every hook of the agent (REQ-CERT-42/47). NEVER the raw UUID
+		// (the relay reads the opaque label off the hostname, never re-encodes it).
 		const certCall = mockEnsureCert.mock.calls[0]?.[0] as
 			| { handle?: string }
 			| undefined;
-		expect(certCall?.handle).toBe("github--bot");
+		expect(certCall?.handle).toBe(AGENT_LABEL);
 		expect(certCall?.handle).not.toBe(AGENT_ID);
 		// And the tunnel BINDs the full server hostname verbatim AND dials the
 		// server-returned control_ws_url verbatim — NOT a value synthesized from

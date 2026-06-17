@@ -56,7 +56,8 @@ npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-
 | `rine keys ...` | Status, generate, rotate, export, import E2EE key pairs |
 | `rine send / read / inbox / reply` | Messaging (with `--payload-file` for file/stdin input) |
 | `rine group ...` | Group CRUD, join, invite, vote, members |
-| `rine webhook ...` | Webhook management |
+| `rine webhook ...` | Outbound webhook management (rine → a URL you host) |
+| `rine hook ... / rine relay` | Inbound webhook Funnel — hook CRUD + the relay daemon (`--tier zero-trust\|shared-edge`) |
 | `rine discover ...` | Browse and search the agent directory |
 | `rine poll-token` | Generate or revoke inbox polling token |
 | `rine stream` | SSE real-time stream with lifecycle events, persistent mode, heartbeat timeout |

@@ -4,11 +4,14 @@
 // reuses the shared output helpers — no reimplemented CRUD or output logic.
 //
 // FROZEN-CONTRACT: the HMAC secret is generated CLIENT-SIDE and NEVER sent to
-// rine — the create POST body carries ONLY {hook_name}. The secret is persisted
-// 0600 BEFORE anything prints, deleted if the allocation POST fails (no orphan),
-// printed exactly ONCE on create, and NEVER shown by `list`.
+// rine — the create POST body carries ONLY {hook_name, tier} (tier is the
+// termination tier or null = "backend default"; NEVER the secret). The secret is
+// persisted 0600 BEFORE anything prints, deleted if the allocation POST fails (no
+// orphan), printed exactly ONCE on create, and NEVER shown by `list`.
 
 import {
+	FUNNEL_TIERS,
+	type FunnelTier,
 	type HookCreated,
 	type HookListResponse,
 	RineApiError,
@@ -19,7 +22,7 @@ import {
 	resolveAgent,
 	saveHookSecret,
 } from "@rine-network/core";
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import { withClient } from "../action.js";
 import {
 	printError,
@@ -31,6 +34,29 @@ import { promptConfirm } from "../prompt.js";
 
 const SIGNATURE_HEADER = "X-Hub-Signature-256";
 const CONTENT_TYPE = "application/json";
+
+// User-facing `--tier` values are hyphenated (`zero-trust`/`shared-edge`); the
+// wire/DB enum (FunnelTier) is underscored. This is the ONLY place that maps the
+// two spellings — the CLI never recomputes the default tier (omitting --tier
+// sends null and the backend's _default_tier_for_trust resolves it, AUD-F5).
+const TIER_CLI_TO_WIRE: Readonly<Record<string, FunnelTier>> =
+	Object.fromEntries(FUNNEL_TIERS.map((t) => [t.replace("_", "-"), t]));
+
+/**
+ * Map a `--tier` flag value (hyphenated) to the wire FunnelTier, or `undefined`
+ * when the flag was omitted (the backend resolves the default). Throws on an
+ * unknown value so a typo fails loudly client-side rather than 422'ing.
+ */
+function resolveTier(raw: string | undefined): FunnelTier | undefined {
+	if (raw === undefined) return undefined;
+	const wire = TIER_CLI_TO_WIRE[raw];
+	if (!wire) {
+		throw new Error(
+			`Invalid --tier '${raw}': expected one of ${Object.keys(TIER_CLI_TO_WIRE).join(", ")}.`,
+		);
+	}
+	return wire;
+}
 
 export function registerHook(program: Command): void {
 	const hook = program
@@ -44,17 +70,34 @@ export function registerHook(program: Command): void {
 		)
 		.option("--agent <id>", "Agent ID (defaults to your agent)")
 		.option("--name <name>", "Hook name (default: default)", "default")
+		// TLS-termination tier. Omitting it sends null and the backend resolves the
+		// default for the org's trust tier — the CLI never recomputes that default
+		// (AUD-F5). `.choices` validates client-side; `resolveTier` maps to the wire.
+		.addOption(
+			new Option(
+				"--tier <tier>",
+				"Termination tier: zero-trust (your relay terminates TLS; rine never sees the cleartext) or shared-edge (rine's broker terminates TLS for high-scale delivery; brief in-memory cleartext, never stored). Default: by trust tier.",
+			).choices(Object.keys(TIER_CLI_TO_WIRE)),
+		)
 		.action(
 			withClient(
 				program,
 				async (
 					{ client, gOpts, apiUrl, configDir },
-					opts: { agent?: string; name: string },
+					opts: { agent?: string; name: string; tier?: string },
 				) => {
 					if (!isValidHookName(opts.name)) {
 						printError(
 							`Invalid hook name '${opts.name}': use lowercase letters, digits and hyphens (max 32).`,
 						);
+						process.exitCode = 2;
+						return;
+					}
+					let tier: FunnelTier | undefined;
+					try {
+						tier = resolveTier(opts.tier);
+					} catch (err) {
+						printError(err instanceof Error ? err.message : String(err));
 						process.exitCode = 2;
 						return;
 					}
@@ -68,20 +111,22 @@ export function registerHook(program: Command): void {
 
 					// Generate + persist the secret BEFORE the POST (the allocation is
 					// non-idempotent): on a POST failure we delete it so no orphan secret
-					// survives an unallocated hook.
+					// survives an unallocated hook. `tier: null` means "let the backend
+					// resolve the default for the org's trust tier" (REQ-TIER-02, AUD-F5).
 					const secret = generateHookSecret();
 					saveHookSecret(configDir, agentId, opts.name, secret);
 					let created: HookCreated;
 					try {
 						created = (await client.post(`/agents/${agentId}/funnel/hooks`, {
 							hook_name: opts.name,
+							tier: tier ?? null,
 						})) as HookCreated;
 					} catch (err) {
 						deleteHookSecret(configDir, agentId, opts.name);
 						throw err;
 					}
 
-					printCreated(created, opts.name, secret, gOpts.json);
+					printCreated(created, secret, gOpts.json);
 				},
 			),
 		);
@@ -112,6 +157,7 @@ export function registerHook(program: Command): void {
 							data.items.map((h) => ({
 								Name: h.hook_name,
 								Hostname: h.hostname,
+								Tier: h.termination.replace("_", "-"),
 								Active: h.active,
 								Created: h.created_at,
 							})),
@@ -171,17 +217,19 @@ export function registerHook(program: Command): void {
 /** Print the print-once GitHub setup block (the secret is shown exactly once). */
 function printCreated(
 	created: HookCreated,
-	name: string,
 	secret: string,
 	json?: boolean,
 ): void {
-	const publicUrl = `https://${created.hostname}/${name}`;
+	// The hook is identified entirely by its hostname (SNI-routed); the relay
+	// ignores the request path, so the payload URL is just the bare host root.
+	const publicUrl = `https://${created.hostname}/`;
 	if (json) {
 		printJson({
 			hook: {
 				name: created.hook_name,
 				hostname: created.hostname,
 				agent_id: created.agent_id,
+				tier: created.termination,
 			},
 			public_url: publicUrl,
 			secret,
@@ -193,6 +241,7 @@ function printCreated(
 	printTable([
 		{ Field: "Hook", Value: created.hook_name },
 		{ Field: "Hostname", Value: created.hostname },
+		{ Field: "Tier", Value: created.termination.replace("_", "-") },
 		{ Field: "Payload URL", Value: publicUrl },
 		{ Field: "Content type", Value: CONTENT_TYPE },
 		{ Field: "Signature header", Value: SIGNATURE_HEADER },
@@ -204,4 +253,13 @@ function printCreated(
 	console.log(
 		"Save this secret now — it is not stored on rine and cannot be retrieved.",
 	);
+	if (created.termination === "shared_edge") {
+		// Shared-edge relaxes the zero-trust guarantee: rine's broker terminates TLS
+		// and holds the decrypted request in memory for an instant (never logged or
+		// stored) before forwarding it to your relay, which still verifies the HMAC
+		// and re-encrypts to your agent (at rest it stays hpke-v1).
+		console.log(
+			"\nThis hook uses the shared-edge tier: rine's broker briefly handles the decrypted request in memory (never logged or stored) before your relay verifies and re-encrypts it. For delivery where rine never sees the cleartext, recreate with --tier zero-trust.",
+		);
+	}
 }
