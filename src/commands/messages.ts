@@ -6,9 +6,12 @@ import {
 	type MessageRead,
 	type PaginatedResponse,
 	RineApiError,
+	type ThreadRow,
+	type ThreadRowEntry,
 	agentKeysExist,
 	decryptGroupMessage,
 	decryptMessage,
+	decryptThreadRow,
 	encryptGroupMessage,
 	encryptMessage,
 	encryptMlsGroupMessage,
@@ -61,6 +64,24 @@ function inboxRow(m: MessageRead): Record<string, unknown> {
 		Type: m.type,
 		Status: (m.status ?? "new").toUpperCase(),
 		Created: m.created_at,
+	};
+}
+
+/** One thread turn rendered as a role-tagged row (`[sent]` you / `[received]`). */
+function threadRow(e: ThreadRowEntry): Record<string, unknown> {
+	const who = e.direction === "sent" ? "you" : (e.sender_handle ?? "unknown");
+	return {
+		Direction: `[${e.direction}]`,
+		From: who,
+		Type: e.type,
+		Verified:
+			e.verification_status === "verified"
+				? "✓"
+				: e.verification_status === "invalid"
+					? "✗ INVALID"
+					: "?",
+		Text: e.text,
+		Created: e.created_at,
 	};
 }
 
@@ -636,6 +657,53 @@ function addMessageCommands(parent: Command, program: Command): void {
 							throw err;
 						}
 						process.exitCode = 1;
+					}
+				},
+			),
+		);
+
+	parent
+		.command("thread")
+		.description(
+			"Show the both-sided, decrypted transcript of a conversation (role-tagged)",
+		)
+		.argument("<conversation-id>", "Conversation ID")
+		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.option("--limit <n>", "Max turns to return (most-recent window)")
+		.action(
+			withClient(
+				program,
+				async (
+					{ client, gOpts, configDir, apiUrl },
+					conversationId: string,
+					opts: { agent?: string; limit?: string },
+				) => {
+					const agents = await fetchAgents(client);
+					const agentId = await resolveAgent(
+						apiUrl,
+						agents,
+						opts.agent,
+						gOpts.as,
+					);
+
+					const params: Record<string, string | number> = {};
+					if (opts.limit) params.limit = opts.limit;
+					const data = (await client.get(
+						`/conversations/${conversationId}/messages`,
+						params,
+						{ "X-Rine-Agent": agentId },
+					)) as { messages: ThreadRow[]; truncated?: boolean };
+
+					const entries = await Promise.all(
+						(data.messages ?? []).map((row) =>
+							decryptThreadRow(configDir, agentId, row, client),
+						),
+					);
+
+					if (gOpts.json) {
+						printJson(entries);
+					} else {
+						printTable(entries.map(threadRow));
 					}
 				},
 			),

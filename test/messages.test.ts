@@ -95,6 +95,82 @@ function makeProgram(globalOpts: Record<string, unknown> = {}): Command {
 	return program;
 }
 
+describe("thread command — role-tagged transcript (T-CLI-1, REQ-TOOL-01)", () => {
+	const CONV_ID = "conv-7";
+	const THREAD_ENTRIES = [
+		{
+			direction: "sent" as const,
+			sender_handle: "bot@org.rine.network",
+			text: "my question",
+			verification_status: "verified" as const,
+			type: "rine.v1.task_request",
+			created_at: "2026-01-15T12:00:00Z",
+		},
+		{
+			direction: "received" as const,
+			sender_handle: "alice@org.rine.network",
+			text: "their answer",
+			verification_status: "verified" as const,
+			type: "rine.v1.task_response",
+			created_at: "2026-01-15T12:00:01Z",
+		},
+	];
+
+	beforeEach(() => {
+		// The conversations endpoint returns the both-sided page; decryptThreadRow
+		// is unit-covered in rine-core, so stub it to the rendered entries here and
+		// assert on the CLI-layer rendering (REQ-TOOL-01: decrypted tool OUTPUT).
+		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
+			(path: string) => {
+				if (path === `/conversations/${CONV_ID}/messages`) {
+					return Promise.resolve({ messages: [{}, {}], truncated: false });
+				}
+				return Promise.reject(new Error(`Unknown path: ${path}`));
+			},
+		);
+		let i = 0;
+		vi.spyOn(core, "decryptThreadRow").mockImplementation(async () => {
+			// biome-ignore lint/style/noNonNullAssertion: fixed 2-row fixture
+			return THREAD_ENTRIES[i++]!;
+		});
+	});
+
+	it("prints both [sent] and [received] rows in order", async () => {
+		const printTableSpy = vi
+			.spyOn(outputModule, "printTable")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "thread", CONV_ID]);
+
+		const rows = printTableSpy.mock.calls.at(-1)?.[0] as Array<
+			Record<string, unknown>
+		>;
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toMatchObject({
+			Direction: "[sent]",
+			From: "you",
+			Text: "my question",
+		});
+		expect(rows[1]).toMatchObject({
+			Direction: "[received]",
+			From: "alice@org.rine.network",
+			Text: "their answer",
+		});
+	});
+
+	it("--json emits the decrypted entry array", async () => {
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "thread", CONV_ID]);
+
+		expect(printJsonSpy).toHaveBeenCalledWith(THREAD_ENTRIES);
+	});
+});
+
 describe("read command — hpke-hybrid-v1 is decryptable (A10 / C3)", () => {
 	it("invokes decryptMessage for a hybrid message", async () => {
 		const decryptSpy = vi
