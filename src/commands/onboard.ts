@@ -4,6 +4,7 @@ import {
 	type AgentRead,
 	type ListResponse,
 	getCredentialEntry,
+	hasSpiffeEndpoint,
 	performAgentCreation,
 	performRegistration,
 	resolveApiUrl,
@@ -26,6 +27,14 @@ export function registerOnboard(program: Command): void {
 			"Require human oversight (default: true)",
 		)
 		.option("--unlisted", "Mark agent as unlisted (not in public directory)")
+		.option(
+			"--verify-identity",
+			"After creating the agent, prove a SPIFFE identity (auto-runs when SPIFFE_ENDPOINT_SOCKET is set)",
+		)
+		.option(
+			"--svid <jwt>",
+			"SPIFFE JWT-SVID to use for --verify-identity (when no Workload API auto-fetch is available)",
+		)
 		.action(
 			withErrorHandler(
 				program,
@@ -38,6 +47,8 @@ export function registerOnboard(program: Command): void {
 						agent: string;
 						humanOversight?: boolean;
 						unlisted?: boolean;
+						verifyIdentity?: boolean;
+						svid?: string;
 					},
 				) => {
 					const profile = gOpts.profile ?? "default";
@@ -119,15 +130,25 @@ export function registerOnboard(program: Command): void {
 						name: opts.agent,
 						humanOversight: opts.humanOversight,
 						unlisted: opts.unlisted,
+						verifyIdentity:
+							opts.verifyIdentity ||
+							Boolean(opts.svid) ||
+							hasSpiffeEndpoint(),
+						svid: opts.svid,
 					});
 
-					// REQ-1.6: Output
+					// REQ-1.6: Output. The agent is created even if a requested SPIFFE
+					// verification failed — print the creation result first, then surface
+					// any verification error as a warning (creation success is never hidden
+					// behind a verify failure).
 					if (gOpts.json) {
 						printJson({
 							org_id: regResult.org_id,
 							client_id: regResult.client_id,
 							agent,
 							poll_url: agent.poll_url,
+							identity: agent.identity,
+							identity_error: agent.identityError,
 							config_dir: configDir,
 						});
 					} else {
@@ -148,6 +169,19 @@ export function registerOnboard(program: Command): void {
 						if (agent.poll_url) {
 							console.log(`Poll URL: ${agent.poll_url}`);
 						}
+						if (agent.identity) {
+							console.log(
+								`SPIFFE identity verified: ${agent.identity.spiffe_id} ` +
+									`(trust tier ${agent.identity.trust_tier})`,
+							);
+						}
+					}
+					if (agent.identityError) {
+						printError(
+							`Agent created, but SPIFFE identity verification failed: ${agent.identityError}\n` +
+								`Retry with: rine verify-identity --agent ${agent.id} --svid <jwt>`,
+						);
+						process.exitCode = 1;
 					}
 				},
 			),

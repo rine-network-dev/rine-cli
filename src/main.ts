@@ -14,6 +14,7 @@ import { registerPollToken } from "./commands/poll-token.js";
 import { registerRegister } from "./commands/register.js";
 import { registerRelay } from "./commands/relay.js";
 import { registerStream } from "./commands/stream.js";
+import { registerVerifyIdentity } from "./commands/verify-identity.js";
 import { registerWebhook } from "./commands/webhook.js";
 
 const require = createRequire(import.meta.url);
@@ -45,5 +46,6 @@ registerKeys(program);
 registerStream(program);
 registerRelay(program);
 registerPollToken(program);
+registerVerifyIdentity(program);
 
 program.parse();

@@ -287,6 +287,7 @@ describe("onboard command — happy path (JSON mode)", () => {
 			client_id: MOCK_REG_RESULT.client_id,
 			agent: MOCK_AGENT,
 			poll_url: MOCK_AGENT.poll_url,
+			identity: undefined,
 			config_dir: "/tmp/test-rine",
 		});
 	});

@@ -67,6 +67,19 @@ export function registerAgent(program: Command): void {
 						if (data.poll_url) {
 							console.log(`Poll URL: ${data.poll_url}`);
 						}
+						if (data.identity) {
+							console.log(
+								`SPIFFE identity verified: ${data.identity.spiffe_id} ` +
+									`(trust tier ${data.identity.trust_tier})`,
+							);
+						}
+					}
+					if (data.identityError) {
+						printError(
+							`Agent created, but SPIFFE identity verification failed: ${data.identityError}\n` +
+								`Retry with: rine verify-identity --agent ${data.id} --svid <jwt>`,
+						);
+						process.exitCode = 1;
 					}
 				},
 			),
