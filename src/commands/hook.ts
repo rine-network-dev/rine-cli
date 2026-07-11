@@ -18,7 +18,7 @@ import {
 	deleteHookSecret,
 	fetchAgents,
 	generateHookSecret,
-	isValidHookName,
+	hookNameError,
 	resolveAgent,
 	saveHookSecret,
 } from "@rine-network/core";
@@ -86,10 +86,9 @@ export function registerHook(program: Command): void {
 					{ client, gOpts, apiUrl, configDir },
 					opts: { agent?: string; name: string; tier?: string },
 				) => {
-					if (!isValidHookName(opts.name)) {
-						printError(
-							`Invalid hook name '${opts.name}': use lowercase letters, digits and hyphens (max 32).`,
-						);
+					const nameError = hookNameError(opts.name);
+					if (nameError) {
+						printError(`Invalid hook name '${opts.name}': ${nameError}.`);
 						process.exitCode = 2;
 						return;
 					}
