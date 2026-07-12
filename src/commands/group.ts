@@ -254,23 +254,28 @@ export function registerGroup(program: Command): void {
 					const data = (await client.post("/groups", body)) as GroupRead;
 
 					// Best-effort: latch MLS for the new group (creator-only init).
-					// New groups default to mls_enabled=true server-side.
-					try {
-						const agents = await fetchAgents(client);
-						const actingAgentId = await resolveAgent(
-							apiUrl,
-							agents,
-							undefined,
-							gOpts.as,
-						);
-						await initMlsGroup(configDir, actingAgentId, data.id, client, {
-							"X-Rine-Agent": actingAgentId,
-						});
-					} catch (err) {
-						if (!gOpts.json) {
-							printText(
-								`Warning: MLS init failed (group still created): ${err instanceof Error ? err.message : String(err)}`,
+					// New groups default to mls_enabled=true server-side. Open-
+					// enrollment groups are exempt: the server refuses MLS there
+					// (403 mls_open_enrollment_disabled — SECURITY.md, H4/S3), so an
+					// init attempt would only ever fail; they run over Sender Keys.
+					if (data.enrollment_policy !== "open") {
+						try {
+							const agents = await fetchAgents(client);
+							const actingAgentId = await resolveAgent(
+								apiUrl,
+								agents,
+								undefined,
+								gOpts.as,
 							);
+							await initMlsGroup(configDir, actingAgentId, data.id, client, {
+								"X-Rine-Agent": actingAgentId,
+							});
+						} catch (err) {
+							if (!gOpts.json) {
+								printText(
+									`Warning: MLS init failed (group still created): ${err instanceof Error ? err.message : String(err)}`,
+								);
+							}
 						}
 					}
 
