@@ -29,6 +29,7 @@ import {
 	fetchAgents,
 	getOrRefreshToken,
 	handleWebhookRequest,
+	jitteredRefreshMargin,
 	loadHookSecret,
 	loadMeta,
 	makeEdgePipeFactory,
@@ -220,6 +221,9 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 	let backoff = 1;
 	let attempt = 0;
 	let stopped = false;
+	// Drawn once for this long-lived relay so co-located agents desynchronize their
+	// token refreshes across reconnects (D-4).
+	const refreshMargin = jitteredRefreshMargin();
 	let lastDeps: IssueCertDeps | undefined;
 	// The cert-cache handle for the active ZERO-TRUST hook — the per-agent label
 	// (REQ-CERT-42), so every hook of an agent shares ONE wildcard cert cache.
@@ -389,7 +393,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				apiUrl,
 				entry,
 				profileName,
-				{ force: false, envToken: process.env.RINE_TOKEN },
+				{ force: false, envToken: process.env.RINE_TOKEN, refreshMargin },
 			);
 
 			// (2) Control WS + mux tunnel (REQ-TUN). Bearer at the upgrade; the

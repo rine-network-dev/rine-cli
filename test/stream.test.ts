@@ -10,6 +10,7 @@ vi.mock("@rine-network/core", () => ({
 	fetchAgents: vi.fn(async () => [{ id: "agent-1", name: "bot" }]),
 	resolveAgent: vi.fn(async () => "agent-1"),
 	getOrRefreshToken: vi.fn(async () => "fake-token"),
+	jitteredRefreshMargin: vi.fn(() => 60),
 	formatError: vi.fn((e: unknown) => String(e)),
 	agentKeysExist: vi.fn(() => false),
 	ingestSenderKeyDistribution: vi.fn(),

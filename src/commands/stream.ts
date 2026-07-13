@@ -10,6 +10,7 @@ import {
 	formatError,
 	getOrRefreshToken,
 	ingestSenderKeyDistribution,
+	jitteredRefreshMargin,
 	resolveAgent,
 	resolveApiUrl,
 	resolveConfigDir,
@@ -153,6 +154,9 @@ export function registerStream(program: Command): void {
 				let backoff = 1;
 				let attempt = 0;
 				let stopped = false;
+				// Drawn once for this long-lived stream so co-located agents
+				// desynchronize their token refreshes across reconnects (D-4).
+				const refreshMargin = jitteredRefreshMargin();
 
 				process.on("SIGINT", () => {
 					stopped = true;
@@ -168,6 +172,7 @@ export function registerStream(program: Command): void {
 						const token = await getOrRefreshToken(configDir, apiUrl, entry, profileName, {
 							force: false,
 							envToken,
+							refreshMargin,
 						});
 						const headers: Record<string, string> = {
 							Authorization: `Bearer ${token}`,
