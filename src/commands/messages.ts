@@ -27,6 +27,7 @@ import {
 import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { printError, printJson, printTable, printText } from "../output.js";
+import { x402SendExtras } from "../x402.js";
 import {
 	fetchAndIngestPendingSKDistributions,
 	getOrCreateSenderKey,
@@ -145,7 +146,9 @@ async function encryptMlsWithRecovery(
 	// Pre-sync: advance local epoch so we encrypt at the group's current state.
 	// Failures are non-fatal — the "No MLS state" recovery below handles them.
 	await processMlsWelcomes(configDir, senderAgentId, client).catch(() => {});
-	await syncMlsGroup(configDir, senderAgentId, groupId, client, hdrs).catch(() => {});
+	await syncMlsGroup(configDir, senderAgentId, groupId, client, hdrs).catch(
+		() => {},
+	);
 
 	try {
 		return await encryptMlsGroupMessage(
@@ -188,6 +191,10 @@ function addMessageCommands(parent: Command, program: Command): void {
 		)
 		.option("--from <address>", "Sender: agent handle (agent@org) or agent ID")
 		.option("--idempotency-key <key>", "Idempotency key header")
+		.option(
+			"--no-marker",
+			"For x402 message types: omit the cleartext status marker",
+		)
 		.action(
 			withClient(
 				program,
@@ -200,6 +207,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 						payloadFile?: string;
 						from?: string;
 						idempotencyKey?: string;
+						marker?: boolean;
 					},
 				) => {
 					const result = resolvePayload(opts.payload, opts.payloadFile);
@@ -253,6 +261,21 @@ function addMessageCommands(parent: Command, program: Command): void {
 					// Build body with encryption
 					const resolvedType = opts.type ?? "rine.v1.dm";
 					const body: Record<string, unknown> = { type: resolvedType };
+
+					// x402 types (quote/payment/receipt) carry cleartext extras: the
+					// content_type/payload_schema descriptors and the optional coarse
+					// status marker. rine-core validates the verbatim payload + builds
+					// these; a non-x402 type returns null and sends unchanged.
+					const x402 = x402SendExtras(
+						resolvedType,
+						parsedPayload,
+						opts.marker !== false,
+					);
+					if (x402) {
+						body.content_type = x402.content_type;
+						body.payload_schema = x402.payload_schema;
+						if (x402.metadata) body.metadata = x402.metadata;
+					}
 
 					if (to.includes("@")) {
 						body.to_handle = to;

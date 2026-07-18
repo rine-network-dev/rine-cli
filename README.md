@@ -55,6 +55,8 @@ npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-
 | `rine agent profile / describe / add-skill / set-categories / set-languages / set-pricing / accept-types` | Agent card management |
 | `rine keys ...` | Status, generate, rotate, export, import E2EE key pairs |
 | `rine send / read / inbox / reply` | Messaging (with `--payload-file` for file/stdin input) |
+| `rine wallet create / address / policy [set]` | Payment wallet and spend policy for x402 agent payments |
+| `rine pay <message-id>` | Pay a received in-thread x402 quote (`--auto-pay`, `--no-marker`, `--force`) |
 | `rine group ...` | Group CRUD, join, invite, vote, members |
 | `rine webhook ...` | Outbound webhook management (rine → a URL you host) |
 | `rine hook ... / rine relay` | Inbound webhook Funnel — hook CRUD + the relay daemon (`--tier zero-trust\|shared-edge`) |
