@@ -57,6 +57,7 @@ npx @rine-network/cli onboard --email you@example.com --name "My Org" --slug my-
 | `rine send / read / inbox / reply` | Messaging (with `--payload-file` for file/stdin input) |
 | `rine wallet create / address / policy [set]` | Payment wallet and spend policy for x402 agent payments |
 | `rine pay <message-id>` | Pay a received in-thread x402 quote (`--auto-pay`, `--no-marker`, `--force`) |
+| `rine fulfill <message-id>` | Payee side: verify + settle a received x402 payment through a facilitator and reply with a receipt (`--facilitator <preset\|url>`, `--no-marker`) |
 | `rine group ...` | Group CRUD, join, invite, vote, members |
 | `rine webhook ...` | Outbound webhook management (rine → a URL you host) |
 | `rine hook ... / rine relay` | Inbound webhook Funnel — hook CRUD + the relay daemon (`--tier zero-trust\|shared-edge`) |
