@@ -1,4 +1,4 @@
-// REQ-M02 — the `rine wallet` command group: manage the agent's secp256k1
+// The `rine wallet` command group: manage the agent's secp256k1
 // payment wallet (4th key type) and its client-side spend policy. Every
 // sub-command runs through `withClient`, resolves the acting agent the same way
 // as the other command groups, and delegates ALL key/policy logic to rine-core

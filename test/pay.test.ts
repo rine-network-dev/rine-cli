@@ -16,7 +16,7 @@ const API_URL = "https://test.rine.network";
 const PAYER = "11111111-1111-1111-1111-111111111111";
 const PAYEE = "22222222-2222-2222-2222-222222222222";
 const MESSAGE_ID = "quote-msg-1";
-const EURC = "0x0000000000000000000000000000000000000001";
+const EURC = "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42";
 
 // A verbatim x402 PaymentRequired quote: 0.10 EURC on Base (100000 atomic, 6-dec).
 const QUOTE = {
@@ -164,6 +164,16 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		const s = JSON.stringify(meta);
 		expect(s).not.toContain("100000");
 		expect(s).not.toContain(EURC);
+	});
+
+	it("R-1: stamps the answered quote's message id into the signed payload", async () => {
+		await run("pay", MESSAGE_ID);
+		// The PaymentPayload we sealed carries the quote-ref extension so the payee
+		// can bind this settlement to the ONE quote it authored.
+		const pp = (core.encryptMessage as ReturnType<typeof vi.fn>).mock.calls.at(
+			0,
+		)?.[3] as core.PaymentPayload;
+		expect(pp.extensions?.[core.X402_QUOTE_REF_KEY]).toBe(MESSAGE_ID);
 	});
 
 	it("signs the payment over the payer's real wallet key (recovers to wallet)", async () => {

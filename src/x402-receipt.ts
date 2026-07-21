@@ -1,77 +1,30 @@
-// Receipt message-plane helper for `rine fulfill` (REQ-M04). Turns the pure
-// verify→settle outcome (from `settleToReceipt`) into an in-thread
-// `rine.v1.x402_receipt` reply and renders the terminal result. Kept separate from
-// the `fulfill` command so that command layer only does argument parsing +
-// facilitator resolution; the settle ladder itself lives in `x402-facilitator.ts`.
-//
-// The payee holds no payer wallet — it only needs its own E2EE keys to encrypt the
-// receipt. The settlement's `network` is the facilitator's verbatim v1 slug, echoed
-// through unchanged (NEVER CAIP-2 string-matched). rine-core owns the receipt build
-// + marker logic; nothing is reshaped here.
+// Terminal-result rendering for `rine fulfill`. Turns the pure
+// verify→settle outcome (from rine-core's shared `settleToReceipt`) into either a
+// machine JSON payload or a human table. The in-thread `rine.v1.x402_receipt`
+// reply itself is built + encrypted + sent by rine-core's shared `sendReceipt`;
+// this file owns ONLY the CLI-specific rendering, so nothing here is reshaped.
 
 import {
-	type HttpClient,
+	type FulfillReceipt,
 	type MessageRead,
-	buildReceiptMessage,
-	encryptMessage,
-	fetchRecipientKeys,
+	matchedQuoteToWire,
 } from "@rine-network/core";
 import { printJson, printTable } from "./output.js";
-import type { FulfillReceipt } from "./x402-facilitator.js";
-
-/**
- * Build the `x402_receipt` message from the settlement body, HPKE-encrypt it to the
- * PAYER (the payment's original sender), and reply in-thread as the payee. Returns
- * the sent message. `emitMarker` toggles the cleartext `{status,rail}` marker.
- */
-export async function sendReceipt(params: {
-	client: HttpClient;
-	configDir: string;
-	payeeAgentId: string;
-	payerAgentId: string;
-	messageId: string;
-	receiptBody: FulfillReceipt["receiptBody"];
-	emitMarker: boolean;
-}): Promise<MessageRead> {
-	const built = buildReceiptMessage(params.receiptBody, {
-		emitMarker: params.emitMarker,
-	});
-	const recipientKeys = await fetchRecipientKeys(
-		params.client,
-		params.payerAgentId,
-	);
-	const encrypted = await encryptMessage(
-		params.configDir,
-		params.payeeAgentId,
-		recipientKeys.encryption,
-		built.payload,
-		recipientKeys.pqEncryption,
-	);
-	const body: Record<string, unknown> = {
-		type: built.type,
-		content_type: built.content_type,
-		payload_schema: built.payload_schema,
-		...encrypted,
-	};
-	if (built.metadata) body.metadata = built.metadata;
-	return (await params.client.post(
-		`/messages/${params.messageId}/reply`,
-		body,
-		{ "X-Rine-Agent": params.payeeAgentId },
-	)) as MessageRead;
-}
 
 /**
  * Render the terminal fulfill outcome — JSON (machine) or a human table. The typed
  * `status` (`settled` / `settlement-failed` / `verification-failed`) is authoritative;
- * `sent` is the receipt message the payer will read.
+ * `sent` is the receipt message the payer will read. The `matchedQuote` (the
+ * payee-issued quote the payment answered — `message_id` `null` for an operator
+ * override) is surfaced so an integration can bind the good it delivers to the
+ * quote that was actually reconciled + settled.
  */
 export function reportFulfill(
 	json: boolean,
 	outcome: FulfillReceipt,
 	sent: MessageRead,
 ): void {
-	const { status, receiptBody } = outcome;
+	const { status, receiptBody, matchedQuote } = outcome;
 	if (json) {
 		printJson({
 			status,
@@ -81,6 +34,7 @@ export function reportFulfill(
 			transaction: receiptBody.transaction || null,
 			network: receiptBody.network,
 			payer: receiptBody.payer,
+			matched_quote: matchedQuoteToWire(matchedQuote),
 		});
 		return;
 	}
@@ -91,5 +45,13 @@ export function reportFulfill(
 		{ Field: "Settled", Value: String(receiptBody.success) },
 		{ Field: "Transaction", Value: receiptBody.transaction || "—" },
 		{ Field: "Network", Value: receiptBody.network },
+		{
+			Field: "Quote",
+			Value: matchedQuote.quoteMessageId ?? "(operator override)",
+		},
+		{
+			Field: "Quote amount",
+			Value: `${matchedQuote.amount} ${matchedQuote.asset}`,
+		},
 	]);
 }

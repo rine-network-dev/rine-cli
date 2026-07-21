@@ -1,4 +1,4 @@
-// Shared x402 message-assembly helper (REQ-M02). Thin wrapper over the rine-core
+// Shared x402 message-assembly helper. Thin wrapper over the rine-core
 // build layer: given a message `type` + the parsed payload, produce the cleartext
 // extras (content_type, payload_schema, optional status marker) to merge into a
 // send/reply body. The x402 objects are carried VERBATIM — this never reshapes

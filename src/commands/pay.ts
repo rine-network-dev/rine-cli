@@ -1,4 +1,4 @@
-// REQ-M02 — `rine pay <message-id>`: respond to a received in-thread x402
+// `rine pay <message-id>`: respond to a received in-thread x402
 // payment_required by signing an EIP-3009 authorization (wallet + spend policy
 // enforced in rine-core) and replying with a `rine.v1.x402_payment` message in
 // the SAME conversation. `--auto-pay` proceeds only when the quote is at/below
@@ -8,7 +8,9 @@
 // ALL payment logic (requirement selection, policy enforcement, EIP-712 signing,
 // spend accounting) lives in rine-core — this command is a thin wrapper that
 // decrypts the quote, drives the core select→build→reserve→send sequence, and
-// renders the result. It never reimplements crypto or policy. The spend is
+// renders the result. It never reimplements crypto or policy. It stamps the
+// answered quote's message id (this command's argument) into the signed payload
+// so the payee binds the settlement to the ONE quote it authored. The spend is
 // reserved under a cross-process lock as the last act before the reply is sent
 // (fail-closed: the debit stands even if the send then fails); `--force` re-pays
 // a quote already in today's journal.
@@ -152,8 +154,15 @@ export function registerPay(program: Command): void {
 						}
 
 						const walletKey = loadWalletKey(configDir, payerAgentId);
+						// Stamp the answered quote's message id (this command's
+						// argument) into the SIGNED payload so the payee can bind this
+						// payment to the ONE quote it authored and refuse a cross-quote or
+						// terms-redirect settle. It rides inside the E2EE, integrity-
+						// protected payload — only the payer can author it.
 						const built = buildPaymentMessage(
-							buildPaymentPayload(pr, requirement, walletKey),
+							buildPaymentPayload(pr, requirement, walletKey, {
+								quoteMessageId: messageId,
+							}),
 							{ emitMarker: opts.marker !== false },
 						);
 

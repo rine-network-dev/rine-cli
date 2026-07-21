@@ -1,4 +1,4 @@
-// REQ-M04 (payee) — `rine fulfill <message-id>`: settle a RECEIVED in-thread
+// `rine fulfill <message-id>` (payee): settle a RECEIVED in-thread
 // `rine.v1.x402_payment` and reply with a `rine.v1.x402_receipt` so the payer's
 // thread reaches a terminal state. Decrypts the signed payment, verifies then
 // settles it via the configured facilitator (plain external HTTP — never rine),
@@ -6,29 +6,43 @@
 // verification, settlement is skipped and a `success:false` receipt is sent so
 // the payer still reaches `payment-failed`.
 //
-// ALL verify/settle logic lives in rine-core (`verifyPayment`/`settlePayment`,
-// via `settleToReceipt`) — this command is a thin adapter that wires the message
-// plane to it. The payee signs nothing (it holds no payer wallet); it only needs
-// its E2EE keys to decrypt the payment and encrypt the receipt. The receipt build,
-// encrypt + in-thread reply, and result rendering live in `x402-receipt.ts`.
+// The payee NEVER trusts the payer-echoed `pp.accepted`. It binds the
+// payment to the ONE quote it answers — the signed `extensions[quoteMessageId]`
+// ref — loads THAT payee-issued quote by id and reconciles against it. A payment
+// with no/forged/cross-conversation ref fails CLOSED (no settle, no receipt)
+// unless explicit operator expected-terms authorise an out-of-band quote. ALL of
+// that (ref-load, reconcile, verify, settle) lives in rine-core's shared
+// `payee-settle` module (`resolvePayeeRequirement`/`settleToReceipt`); this
+// command is a thin adapter that wires the message plane to it. The payee signs
+// nothing (it holds no payer wallet); it only needs its E2EE keys to decrypt the
+// payment and its own self-sealed quote, and to encrypt the receipt. The receipt
+// build, encrypt + in-thread reply live in rine-core's shared `sendReceipt`; only
+// the CLI-specific terminal rendering lives in `x402-receipt.ts`.
 
 import {
 	type FacilitatorConfig,
 	type MessageRead,
 	type PaymentPayload,
+	type ResolvedPayeeRequirement,
+	X402Error,
 	X402FacilitatorError,
 	X402_MESSAGE_TYPE,
 	agentKeysExist,
 	decryptMessage,
 	fetchAgents,
+	parseFacilitatorHeaders,
 	parseX402Payload,
+	refusalReceiptBody,
 	resolveAgent,
+	resolveFacilitatorConfig,
+	resolvePayeeRequirement,
+	sendReceipt,
+	settleToReceipt,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { printError, printJson } from "../output.js";
-import { resolveFacilitator, settleToReceipt } from "../x402-facilitator.js";
-import { reportFulfill, sendReceipt } from "../x402-receipt.js";
+import { reportFulfill } from "../x402-receipt.js";
 
 function collectHeader(v: string, acc: string[]): string[] {
 	acc.push(v);
@@ -39,7 +53,14 @@ export function registerFulfill(program: Command): void {
 	program
 		.command("fulfill")
 		.description(
-			"Settle a received x402_payment via the facilitator and reply with an x402_receipt",
+			"Settle a received x402_payment via the facilitator and reply with an x402_receipt. " +
+				"The payment is bound to the ONE payee-issued x402_payment_required quote it " +
+				"references (the signed quoteMessageId) and reconciled against THAT quote " +
+				"(payTo/amount/asset/network/scheme) — the payer's echoed terms are never trusted. " +
+				"A payment carrying no/forged/cross-conversation quote reference REFUSES to settle " +
+				"(fail closed) unless explicit expected terms " +
+				"(--pay-to/--expect-amount/--expect-asset/--expect-network) authorise an " +
+				"out-of-band quote.",
 		)
 		.argument("<message-id>", "ID of the received rine.v1.x402_payment")
 		.option("--agent <id>", "Payee agent ID (defaults to your agent)")
@@ -56,6 +77,22 @@ export function registerFulfill(program: Command): void {
 		)
 		.option("--verify-path <path>", "Override the facilitator /verify path")
 		.option("--settle-path <path>", "Override the facilitator /settle path")
+		.option(
+			"--pay-to <address>",
+			"Out-of-band quote: expected payee wallet (0x). Requires --expect-amount/--expect-asset/--expect-network; overrides the referenced quote (no quoteMessageId needed)",
+		)
+		.option(
+			"--expect-amount <major>",
+			"Out-of-band quote: expected amount in MAJOR units (e.g. 1.00). Overpayment is accepted, underpayment refused",
+		)
+		.option(
+			"--expect-asset <address>",
+			"Out-of-band quote: expected token contract (0x)",
+		)
+		.option(
+			"--expect-network <caip2>",
+			"Out-of-band quote: expected CAIP-2 network (e.g. eip155:8453)",
+		)
 		.option("--no-marker", "Omit the cleartext status marker (fully sealed)")
 		.action(
 			withClient(
@@ -69,6 +106,10 @@ export function registerFulfill(program: Command): void {
 						facilitatorHeader: string[];
 						verifyPath?: string;
 						settlePath?: string;
+						payTo?: string;
+						expectAmount?: string;
+						expectAsset?: string;
+						expectNetwork?: string;
 						marker?: boolean;
 					},
 				) => {
@@ -114,8 +155,8 @@ export function registerFulfill(program: Command): void {
 
 					let facilitator: FacilitatorConfig;
 					try {
-						facilitator = resolveFacilitator(opts.facilitator, {
-							headers: opts.facilitatorHeader,
+						facilitator = resolveFacilitatorConfig(opts.facilitator, {
+							headers: parseFacilitatorHeaders(opts.facilitatorHeader),
 							verifyPath: opts.verifyPath,
 							settlePath: opts.settlePath,
 						});
@@ -132,17 +173,98 @@ export function registerFulfill(program: Command): void {
 						message.encrypted_payload,
 						client,
 					);
-					const pp = parseX402Payload(
-						message.type,
-						decrypted.plaintext,
-					) as PaymentPayload;
+					// A structurally malformed payment (no `accepted` / no signed
+					// authorization) is a typed, catchable refusal — thread a graceful
+					// payment-failed receipt so the payer reaches a terminal state,
+					// never a stack trace.
+					let pp: PaymentPayload;
+					try {
+						pp = parseX402Payload(
+							message.type,
+							decrypted.plaintext,
+						) as PaymentPayload;
+					} catch (err) {
+						if (!(err instanceof X402Error)) throw err;
+						const sent = await sendReceipt({
+							client,
+							configDir,
+							payeeAgentId,
+							payerAgentId,
+							messageId,
+							receiptBody: refusalReceiptBody("", "", err.code),
+							emitMarker: opts.marker !== false,
+						});
+						printError(`Malformed payment payload: ${err.message}`);
+						if (gOpts.json)
+							printJson({
+								status: "malformed-payload",
+								code: err.code,
+								detail: err.message,
+								receipt_id: sent.id,
+							});
+						process.exitCode = 1;
+						return;
+					}
+
+					// Bind the payment to the ONE payee-issued quote it references
+					// (or explicit operator expected terms) and forward the RETURNED
+					// payee-owned requirement — never the payer-echoed `pp.accepted` — to
+					// the facilitator. A missing/forged/cross-conversation ref (or no
+					// override) ⇒ REFUSE: settle nothing and thread no receipt, so a
+					// malicious payer can never coax a settlement out of terms it authored.
+					let resolved: ResolvedPayeeRequirement;
+					try {
+						resolved = await resolvePayeeRequirement({
+							payment: pp,
+							expected: {
+								payTo: opts.payTo,
+								expectAmount: opts.expectAmount,
+								expectAsset: opts.expectAsset,
+								expectNetwork: opts.expectNetwork,
+							},
+							client,
+							configDir,
+							payeeAgentId,
+							conversationId: message.conversation_id,
+						});
+					} catch (err) {
+						if (!(err instanceof X402Error)) throw err;
+						// Fail-closed means "no settle" — never "no receipt". Thread a
+						// graceful payment-failed receipt (parity with the malformed-payload
+						// branch and both SDK payees) so the payer still reaches a terminal
+						// state. `network`/`payer` are echoed for provenance only — no funds
+						// move and the facilitator was never contacted.
+						const sent = await sendReceipt({
+							client,
+							configDir,
+							payeeAgentId,
+							payerAgentId,
+							messageId,
+							receiptBody: refusalReceiptBody(
+								pp.accepted.network,
+								pp.payload.authorization.from,
+								err.code,
+							),
+							emitMarker: opts.marker !== false,
+						});
+						printError(`Refusing to settle: ${err.message}`);
+						if (gOpts.json)
+							printJson({
+								status: "payment-refused",
+								code: err.code,
+								detail: err.message,
+								receipt_id: sent.id,
+							});
+						process.exitCode = 1;
+						return;
+					}
 
 					// verify → (if valid) settle → receipt body. A facilitator HTTP
 					// failure is a typed outcome, not a stack trace: no receipt is sent
 					// and the payer's thread stays open for a retry.
 					let outcome: Awaited<ReturnType<typeof settleToReceipt>>;
 					try {
-						outcome = await settleToReceipt(pp, facilitator);
+						outcome = await settleToReceipt(pp, resolved, facilitator);
 					} catch (err) {
 						if (err instanceof X402FacilitatorError) {
 							printError(

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.16.1 — 2026-07
+
+### Security
+
+- `rine fulfill` binds a settlement to the exact quote tier the payer names and
+  checks the amount against the signed payment authorization, refusing a payment
+  that overstates the accepted amount above a quoted tier.
+- Requests to a payment facilitator carry only the standard x402 settlement
+  fields; rine message extensions are not forwarded to external facilitators.
+- Payments in a token with unverifiable decimals are rejected, and facilitator
+  endpoints must use HTTPS.
+
 ## 0.7.0 — 2026-04
 
 ### Core extraction

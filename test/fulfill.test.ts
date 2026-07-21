@@ -1,9 +1,16 @@
-// REQ-M04 — `rine fulfill <message-id>`. Drives the REAL command end-to-end:
-// decrypt the received x402_payment → verify → settle → build + send the receipt
-// in-thread. Only the network/crypto boundary is mocked — the peer-keyed decrypt
-// of the payment, the facilitator verify/settle HTTP, the HPKE encrypt of the
-// receipt, recipient-key fetch, and the HTTP client. The receipt build layer,
-// marker discipline, and typed-status routing run for real.
+// REQ-M04 / R-1 — `rine fulfill <message-id>`. Drives the REAL command: fetch the
+// payment message → parse the decrypted x402_payment (real `parseX402Payload`) →
+// resolve the payee-owned requirement + settle via rine-core's SHARED
+// `resolvePayeeRequirement`/`settleToReceipt` (the R-1 ref-bind + reconcile +
+// verify/settle ladder, unit-tested exhaustively in rine-core) → build + send the
+// receipt in-thread (real `buildReceiptMessage`/marker discipline). This lane owns
+// the CLI wiring: it asserts the command forwards the right inputs to the shared
+// orchestration (the answered payment, the operator `--expect` terms, the
+// conversation + payee binding), routes every typed outcome (settled /
+// verification-failed / typed refusal / facilitator error) to the correct
+// receipt + exit code, and surfaces the matched quote. The rine-core seam is
+// mocked (its public API — never its internals) so the CLI's own behaviour is
+// what's under test, not a re-run of rine-core's reconcile matrix.
 
 import * as core from "@rine-network/core";
 import { Command } from "commander";
@@ -14,34 +21,73 @@ const API_URL = "https://test.rine.network";
 const PAYER = "11111111-1111-1111-1111-111111111111";
 const PAYEE = "22222222-2222-2222-2222-222222222222";
 const MESSAGE_ID = "payment-msg-1";
+// The quote message the payment answers (R-1 ref) — carried in the signed payload.
+const QUOTE_ID = "quote-msg-1";
+const QUOTE_REF = core.X402_QUOTE_REF_KEY;
 const EURC = "0x0000000000000000000000000000000000000001";
 const PAY_TO = "0x00000000000000000000000000000000000000ff";
+const REGISTRY_EURC = "0x808456652fdb597867f38412077a9182bf77359f";
+const SEPOLIA = "eip155:84532";
 
-// A verbatim x402 PaymentPayload (signed authorization) received by the payee.
-const PAYMENT = {
-	x402Version: 2,
-	resource: { description: "translate a document" },
-	accepted: {
-		scheme: "exact",
-		network: "eip155:84532",
-		amount: "100000",
-		asset: EURC,
-		payTo: PAY_TO,
-		maxTimeoutSeconds: 60,
-		extra: { name: "EURC", version: "2" },
-	},
-	payload: {
-		signature: `0x${"ab".repeat(65)}`,
-		authorization: {
-			from: PAYER,
-			to: PAY_TO,
-			value: "100000",
-			validAfter: "0",
-			validBefore: "9999999999",
-			nonce: `0x${"00".repeat(32)}`,
+// A verbatim x402 PaymentPayload (signed authorization) received by the payee. By
+// default it stamps the answered-quote ref (R-1); pass `{}` extensions to model an
+// older payer that omitted it.
+function payment(
+	acceptedOverrides: Record<string, unknown> = {},
+	extensions: Record<string, unknown> = { [QUOTE_REF]: QUOTE_ID },
+) {
+	return {
+		x402Version: 2,
+		resource: { description: "translate a document" },
+		accepted: {
+			scheme: "exact",
+			network: SEPOLIA,
+			amount: "100000",
+			asset: EURC,
+			payTo: PAY_TO,
+			maxTimeoutSeconds: 60,
+			extra: { name: "EURC", version: "2" },
+			...acceptedOverrides,
 		},
-	},
+		payload: {
+			signature: `0x${"ab".repeat(65)}`,
+			authorization: {
+				from: PAYER,
+				to: PAY_TO,
+				value: "100000",
+				validAfter: "0",
+				validBefore: "9999999999",
+				nonce: `0x${"00".repeat(32)}`,
+			},
+		},
+		extensions,
+	};
+}
+
+// The payee-owned requirement + matched-quote provenance rine-core resolves the
+// payment to. `resolvePayeeRequirement` is mocked to return this on the happy path.
+const REQUIREMENT: core.PaymentRequirements = {
+	scheme: "exact",
+	network: SEPOLIA,
+	amount: "100000",
+	asset: EURC,
+	payTo: PAY_TO,
+	maxTimeoutSeconds: 60,
+	extra: { name: "EURC", version: "2" },
 };
+function resolved(
+	quoteMessageId: string | null = QUOTE_ID,
+): core.ResolvedPayeeRequirement {
+	return {
+		requirement: REQUIREMENT,
+		match: {
+			quoteMessageId,
+			amount: REQUIREMENT.amount as string,
+			asset: EURC,
+			network: SEPOLIA,
+		},
+	};
+}
 
 // The facilitator echoes the v1 network SLUG (never CAIP-2) into the settlement.
 const SETTLEMENT: core.SettlementResponse = {
@@ -50,6 +96,15 @@ const SETTLEMENT: core.SettlementResponse = {
 	network: "base-sepolia",
 	payer: PAYER,
 };
+function settled(over: Partial<core.FulfillReceipt> = {}): core.FulfillReceipt {
+	return {
+		status: "settled",
+		receiptBody: SETTLEMENT,
+		verification: { isValid: true, payer: PAYER },
+		matchedQuote: resolved().match,
+		...over,
+	};
+}
 
 function paymentMessage(
 	overrides: Record<string, unknown> = {},
@@ -67,12 +122,15 @@ function paymentMessage(
 	} as unknown as core.MessageRead;
 }
 
-let postBody: Record<string, unknown> | undefined;
-let postPath: string | undefined;
+let paymentPlaintext: string;
+// The args the command forwards to rine-core's SHARED `sendReceipt` (the in-thread
+// receipt reply seam). Its build/encrypt/marker discipline is unit-tested in
+// rine-core; here we assert the CLI hands it the right receipt for each outcome.
+let receiptParams: Parameters<typeof core.sendReceipt>[0] | undefined;
 
 beforeEach(() => {
-	postBody = undefined;
-	postPath = undefined;
+	receiptParams = undefined;
+	paymentPlaintext = JSON.stringify(payment());
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine-fulfill");
@@ -95,34 +153,36 @@ beforeEach(() => {
 			return Promise.reject(new Error(`Unknown GET ${path}`));
 		},
 	);
-	vi.spyOn(core.HttpClient.prototype, "post").mockImplementation(
-		(path: string, body?: unknown) => {
-			postPath = path;
-			postBody = body as Record<string, unknown>;
-			return Promise.resolve({
-				id: "receipt-msg-1",
-				conversation_id: "conv-1",
-			});
-		},
+	// The command must NEVER post directly — every receipt goes through the shared
+	// sendReceipt seam (mocked below). A stray raw post is a regression, so fail loud.
+	vi.spyOn(core.HttpClient.prototype, "post").mockRejectedValue(
+		new Error(
+			"fulfill must reply via the shared sendReceipt seam, not client.post",
+		),
 	);
 
-	vi.spyOn(core, "decryptMessage").mockResolvedValue({
-		plaintext: JSON.stringify(PAYMENT),
-		senderKid: `rine:${PAYER}`,
-		verified: true,
-		verificationStatus: "verified",
-	} as never);
-	vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
-		encryption: new Uint8Array(32),
-		pqEncryption: undefined,
-	} as never);
-	vi.spyOn(core, "encryptMessage").mockResolvedValue({
-		encrypted_payload: "ciphertext-receipt",
-		encryption_version: "hpke-v1",
-		sender_signing_kid: `rine:${PAYEE}`,
-	} as never);
-	vi.spyOn(core, "verifyPayment").mockResolvedValue({ isValid: true } as never);
-	vi.spyOn(core, "settlePayment").mockResolvedValue(SETTLEMENT as never);
+	// The received payment is decrypted directly by the command (barrel call).
+	vi.spyOn(core, "decryptMessage").mockImplementation(
+		() =>
+			Promise.resolve({
+				plaintext: paymentPlaintext,
+				senderKid: `rine:${PAYER}`,
+				verified: true,
+				verificationStatus: "verified",
+			}) as never,
+	);
+	// The R-1 ref-bind + reconcile + verify/settle ladder AND the receipt reply both
+	// live (and are exhaustively tested) in rine-core — mock their public seams so
+	// the CLI's own routing (which receipt for which outcome) is what's under test.
+	vi.spyOn(core, "resolvePayeeRequirement").mockResolvedValue(resolved());
+	vi.spyOn(core, "settleToReceipt").mockResolvedValue(settled());
+	vi.spyOn(core, "sendReceipt").mockImplementation((params) => {
+		receiptParams = params;
+		return Promise.resolve({
+			id: "receipt-msg-1",
+			conversation_id: "conv-1",
+		} as core.MessageRead);
+	});
 });
 
 afterEach(() => {
@@ -144,61 +204,201 @@ function run(...argv: string[]): Promise<Command> {
 	return makeProgram({ json: true }).parseAsync(["node", "rine", ...argv]);
 }
 
-describe("rine fulfill — happy path (verify → settle → receipt)", () => {
-	it("replies in-thread with a rine.v1.x402_receipt as the payee", async () => {
+/** Parse the last `printJson` payload (the fulfill result) off the console spy. */
+function lastJson(): Record<string, unknown> {
+	const calls = (console.log as ReturnType<typeof vi.fn>).mock.calls;
+	return JSON.parse(calls[calls.length - 1]?.[0] as string);
+}
+
+describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => {
+	it("replies in-thread with the settlement receipt as the payee", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		expect(postPath).toBe(`/messages/${MESSAGE_ID}/reply`);
-		expect(postBody?.type).toBe("rine.v1.x402_receipt");
-		expect(postBody?.encrypted_payload).toBe("ciphertext-receipt");
+		// The shared sendReceipt is handed the in-thread reply target (the payment),
+		// the payee identity, and the successful settlement body.
+		expect(core.sendReceipt).toHaveBeenCalledTimes(1);
+		expect(receiptParams?.messageId).toBe(MESSAGE_ID);
+		expect(receiptParams?.payeeAgentId).toBe(PAYEE);
+		expect(receiptParams?.receiptBody).toEqual(SETTLEMENT);
 		expect(process.exitCode).toBeUndefined();
 	});
 
-	it("verifies before settling and passes the verbatim payment payload", async () => {
+	it("binds the settle to the answered payment + conversation + payee (R-1 wiring)", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		const verifyArg = (core.verifyPayment as ReturnType<typeof vi.fn>).mock
-			.calls[0]?.[0] as core.PaymentPayload;
-		expect(verifyArg.payload.authorization.from).toBe(PAYER);
-		expect(verifyArg.accepted.asset).toBe(EURC);
-		expect(core.verifyPayment).toHaveBeenCalledTimes(1);
-		expect(core.settlePayment).toHaveBeenCalledTimes(1);
+		const resolveArg = (
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mock.calls[0]?.[0] as {
+			payment: core.PaymentPayload;
+			expected: Record<string, unknown>;
+			conversationId: string;
+			payeeAgentId: string;
+		};
+		// The verbatim payment the payee received is what gets reconciled…
+		expect(resolveArg.payment.payload.authorization.from).toBe(PAYER);
+		// …bound to THIS conversation and THIS payee (the real R-1 binding inputs).
+		expect(resolveArg.conversationId).toBe("conv-1");
+		expect(resolveArg.payeeAgentId).toBe(PAYEE);
+		// No operator override supplied → the ref path is taken.
+		expect(resolveArg.expected).toEqual({
+			payTo: undefined,
+			expectAmount: undefined,
+			expectAsset: undefined,
+			expectNetwork: undefined,
+		});
+		// The RESOLVED payee-owned struct (never pp.accepted) is forwarded to settle.
+		const settleArgs = (core.settleToReceipt as ReturnType<typeof vi.fn>).mock
+			.calls[0];
+		expect(settleArgs?.[0]).toMatchObject({
+			payload: { authorization: { from: PAYER } },
+		});
+		expect(settleArgs?.[1]).toEqual(resolved());
+	});
+
+	it("R-1: surfaces the matched quote (id + amount + asset + network) in the result", async () => {
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		expect(lastJson().matched_quote).toEqual({
+			message_id: QUOTE_ID,
+			amount: "100000",
+			asset: EURC,
+			network: SEPOLIA,
+		});
 	});
 
 	it("resolves a preset facilitator name to its base URL", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "payai");
-		const opts = (core.verifyPayment as ReturnType<typeof vi.fn>).mock
-			.calls[0]?.[1] as { facilitator: core.FacilitatorConfig };
-		expect(opts.facilitator.url).toBe("https://facilitator.payai.network");
+		const facilitator = (core.settleToReceipt as ReturnType<typeof vi.fn>).mock
+			.calls[0]?.[2] as core.FacilitatorConfig;
+		expect(facilitator.url).toBe("https://facilitator.payai.network");
 	});
 
-	it("encrypts the receipt to the PAYER (the payment's sender)", async () => {
+	it("addresses the receipt to the PAYER and sends it as the PAYEE", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		expect(core.fetchRecipientKeys).toHaveBeenCalledWith(
-			expect.anything(),
-			PAYER,
+		// sendReceipt encrypts to the payer (the payment's original sender) and
+		// replies as the payee — the CLI supplies both identities.
+		expect(receiptParams?.payerAgentId).toBe(PAYER);
+		expect(receiptParams?.payeeAgentId).toBe(PAYEE);
+	});
+});
+
+describe("rine fulfill — typed refusal routing (fail closed)", () => {
+	it("REFUSES when the payment cannot be bound to a payee quote (NO_QUOTE)", async () => {
+		(
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mockRejectedValue(
+			new core.X402Error(core.X402_ERROR.NO_QUOTE, "no bound quote"),
 		);
-		// Sent as the payee agent.
-		const headers = (core.HttpClient.prototype.post as ReturnType<typeof vi.fn>)
-			.mock.calls[0]?.[2] as Record<string, string>;
-		expect(headers).toEqual({ "X-Rine-Agent": PAYEE });
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		// Fail closed = "no settle", NEVER "no receipt": the facilitator is never
+		// contacted, but the payer still reaches a terminal payment-failed state.
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(lastJson()).toMatchObject({
+			status: "payment-refused",
+			code: core.X402_ERROR.NO_QUOTE,
+			receipt_id: "receipt-msg-1",
+		});
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("threads a terminal payment-failed receipt to the payer on refusal (finding #2)", async () => {
+		(
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mockRejectedValue(
+			new core.X402Error(core.X402_ERROR.NO_QUOTE, "no bound quote"),
+		);
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		// A refusal receipt is replied in-thread to the payer's payment — the payer's
+		// thread now reaches its terminal state instead of hanging open forever.
+		// No funds move: the settle ladder was never entered.
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(core.sendReceipt).toHaveBeenCalledTimes(1);
+		expect(receiptParams?.messageId).toBe(MESSAGE_ID);
+		expect(receiptParams?.payerAgentId).toBe(PAYER);
+		// A failure receipt (success:false) with the typed refusal code — core turns
+		// this into the payment-failed marker (marker discipline tested in rine-core).
+		expect(receiptParams?.receiptBody).toMatchObject({
+			success: false,
+			transaction: "",
+			payer: PAYER,
+			errorReason: core.X402_ERROR.NO_QUOTE,
+		});
+		expect(receiptParams?.emitMarker).toBe(true);
+	});
+
+	it("REFUSES a hostile payer whose terms match no quote (REQUIREMENT_MISMATCH)", async () => {
+		(
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mockRejectedValue(
+			new core.X402Error(
+				core.X402_ERROR.REQUIREMENT_MISMATCH,
+				"payTo redirect / underpay / wrong asset",
+			),
+		);
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		// Still no settle — but the payer gets a payment-failed receipt so its
+		// thread terminates rather than waiting on a settlement that never comes.
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(receiptParams?.receiptBody).toMatchObject({
+			success: false,
+			errorReason: core.X402_ERROR.REQUIREMENT_MISMATCH,
+		});
+		expect(lastJson()).toMatchObject({
+			status: "payment-refused",
+			code: core.X402_ERROR.REQUIREMENT_MISMATCH,
+			receipt_id: "receipt-msg-1",
+		});
+		expect(process.exitCode).toBe(1);
+	});
+});
+
+describe("rine fulfill — explicit expected-terms override (out-of-band quote)", () => {
+	it("forwards the --pay-to/--expect-* terms to the shared resolver and settles", async () => {
+		(
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mockResolvedValue(resolved(null));
+		// settleToReceipt threads the resolved match through — an override yields a
+		// null quote message-id.
+		(core.settleToReceipt as ReturnType<typeof vi.fn>).mockResolvedValue(
+			settled({ matchedQuote: resolved(null).match }),
+		);
+		await run(
+			"fulfill",
+			MESSAGE_ID,
+			"--facilitator",
+			"https://fac.test",
+			"--pay-to",
+			PAY_TO,
+			"--expect-amount",
+			"0.10",
+			"--expect-asset",
+			REGISTRY_EURC,
+			"--expect-network",
+			SEPOLIA,
+		);
+		const resolveArg = (
+			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
+		).mock.calls[0]?.[0] as { expected: Record<string, unknown> };
+		expect(resolveArg.expected).toEqual({
+			payTo: PAY_TO,
+			expectAmount: "0.10",
+			expectAsset: REGISTRY_EURC,
+			expectNetwork: SEPOLIA,
+		});
+		expect(core.settleToReceipt).toHaveBeenCalledTimes(1);
+		// An operator override surfaces a null quote message-id.
+		expect(lastJson().matched_quote).toMatchObject({ message_id: null });
+		expect(process.exitCode).toBeUndefined();
 	});
 });
 
 describe("rine fulfill — marker discipline (REQ-X03)", () => {
-	it("attaches only the payment-completed {status,rail} marker on success", async () => {
+	it("forwards emitMarker=true by default so core emits the status marker", async () => {
+		// The cleartext {status,rail} marker byte-shape + its economic-leak freedom
+		// are unit-tested in rine-core's buildReceiptMessage; the CLI's job is only to
+		// forward the emitMarker flag, which defaults on.
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		const meta = postBody?.metadata as Record<string, unknown>;
-		expect(meta["rine.x402"]).toEqual({
-			status: "payment-completed",
-			rail: "x402",
-		});
-		// The marker must never leak the tx hash, amount, network, or payer.
-		const s = JSON.stringify(meta);
-		expect(s).not.toContain("0xdeadbeef");
-		expect(s).not.toContain("100000");
-		expect(s).not.toContain("base-sepolia");
+		expect(receiptParams?.emitMarker).toBe(true);
 	});
 
-	it("--no-marker omits the cleartext status marker", async () => {
+	it("--no-marker forwards emitMarker=false (fully sealed receipt)", async () => {
 		await run(
 			"fulfill",
 			MESSAGE_ID,
@@ -206,50 +406,76 @@ describe("rine fulfill — marker discipline (REQ-X03)", () => {
 			"https://fac.test",
 			"--no-marker",
 		);
-		expect(postBody?.metadata).toBeUndefined();
+		expect(receiptParams?.emitMarker).toBe(false);
 	});
 });
 
 describe("rine fulfill — failure branches (typed outcomes)", () => {
 	it("sends a payment-failed receipt when verification is invalid (exit 1)", async () => {
-		(core.verifyPayment as ReturnType<typeof vi.fn>).mockResolvedValue({
-			isValid: false,
-			invalidReason: "signature_mismatch",
-		});
+		const failureBody = {
+			success: false,
+			transaction: "",
+			network: SEPOLIA,
+			payer: PAYER,
+			errorReason: "signature_mismatch",
+		};
+		(core.settleToReceipt as ReturnType<typeof vi.fn>).mockResolvedValue(
+			settled({ status: "verification-failed", receiptBody: failureBody }),
+		);
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		// Settlement is SKIPPED on invalid verification.
-		expect(core.settlePayment).not.toHaveBeenCalled();
-		// A failure receipt is still sent so the payer reaches a terminal state.
-		expect(postBody?.type).toBe("rine.v1.x402_receipt");
-		const meta = postBody?.metadata as Record<string, unknown>;
-		expect(meta["rine.x402"]).toEqual({
-			status: "payment-failed",
-			rail: "x402",
-		});
+		// The failed settlement body is threaded verbatim to the payer (core turns
+		// success:false into the payment-failed marker).
+		expect(receiptParams?.receiptBody).toEqual(failureBody);
 		expect(process.exitCode).toBe(1);
 	});
 
 	it("sends a payment-failed receipt when the settlement itself fails (exit 1)", async () => {
-		(core.settlePayment as ReturnType<typeof vi.fn>).mockResolvedValue({
+		const failureBody = {
 			success: false,
 			transaction: "",
 			network: "base-sepolia",
 			payer: PAYER,
 			errorReason: "insufficient_funds",
-		});
+		};
+		(core.settleToReceipt as ReturnType<typeof vi.fn>).mockResolvedValue(
+			settled({ status: "settlement-failed", receiptBody: failureBody }),
+		);
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		expect(postBody?.type).toBe("rine.v1.x402_receipt");
+		expect(receiptParams?.receiptBody).toEqual(failureBody);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("F-4: threads a graceful payment-failed receipt on a malformed payload (no crash)", async () => {
+		paymentPlaintext = JSON.stringify({ payload: {} }); // no `accepted`
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		// The malformed payload never reaches the resolver/settle ladder…
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		// …but the payer still reaches a terminal payment-failed state via a refusal
+		// receipt built from the shared refusalReceiptBody (finding #10 — empty
+		// network/payer since the payload could not even be parsed).
+		expect(core.sendReceipt).toHaveBeenCalledTimes(1);
+		expect(receiptParams?.receiptBody).toMatchObject({
+			success: false,
+			transaction: "",
+			network: "",
+			payer: "",
+		});
+		expect(receiptParams?.receiptBody.errorReason).toBeTruthy();
 		expect(process.exitCode).toBe(1);
 	});
 
 	it("surfaces a facilitator HTTP failure as facilitator-error and sends NO receipt", async () => {
-		(core.verifyPayment as ReturnType<typeof vi.fn>).mockRejectedValue(
+		(core.settleToReceipt as ReturnType<typeof vi.fn>).mockRejectedValue(
 			new core.X402FacilitatorError("verify 400", 400, {
 				error: "no resource",
 			}),
 		);
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
-		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		// A facilitator transport failure leaves the thread open for a retry — no
+		// receipt is sent at all.
+		expect(core.sendReceipt).not.toHaveBeenCalled();
+		expect(lastJson()).toMatchObject({ status: "facilitator-error" });
 		expect(process.exitCode).toBe(1);
 	});
 
@@ -259,21 +485,21 @@ describe("rine fulfill — failure branches (typed outcomes)", () => {
 		).mockResolvedValue(paymentMessage({ type: "rine.v1.dm" }));
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		expect(process.exitCode).toBe(2);
-		expect(core.verifyPayment).not.toHaveBeenCalled();
-		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
+		expect(core.sendReceipt).not.toHaveBeenCalled();
 	});
 
 	it("refuses fulfilling your own payment (exit 1)", async () => {
 		(core.resolveAgent as ReturnType<typeof vi.fn>).mockResolvedValue(PAYER);
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		expect(process.exitCode).toBe(1);
-		expect(core.verifyPayment).not.toHaveBeenCalled();
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
 	});
 
 	it("errors on an unknown facilitator spec before any external call (exit 2)", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "not-a-facilitator");
 		expect(process.exitCode).toBe(2);
 		expect(core.decryptMessage).not.toHaveBeenCalled();
-		expect(core.verifyPayment).not.toHaveBeenCalled();
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
 	});
 });
