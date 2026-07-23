@@ -1,9 +1,9 @@
-// REQ-CLI-06/07/08/09 — the long-lived `rine relay` daemon. Structured on
+// The long-lived `rine relay` daemon. Structured on
 // stream.ts (NOT withClient): it builds its own client, installs a SIGINT handler
 // that flips stopped=true + exitCode=0, and runs a while(!stopped) reconnect loop
 // with jittered backoff capped at 30s and in-loop token refresh. On startup and
 // each reconnect it orchestrates the four subsystems IN ORDER:
-//   (1) cert provision/renew (REQ-CERT) → (2) control WS + mux tunnel (REQ-TUN) →
+//   (1) cert provision/renew → (2) control WS + mux tunnel →
 //   (3) local TLS-terminating listener → (4) per-request verify/encrypt/post.
 // This file is PURE orchestration: no inline ACME, no inline mux framing, no
 // inline crypto — it calls the rine-core funnel entry points and the relay
@@ -65,10 +65,10 @@ function jitteredDelayMs(backoffSeconds: number): number {
 	return Math.round(backoffSeconds * (0.5 + Math.random()) * 1000);
 }
 
-// (AUD-D2) Cadence of the standing renewal re-check. A long-connected relay's
+// Cadence of the standing renewal re-check. A long-connected relay's
 // reconnect-loop ensureCert never fires past the renewal window, so this timer
 // re-evaluates renewalDueWithJitter periodically. 12h is well under the 30-day
-// renewal window + the 20-day jitter spread (REQ-CERT-46), so the deterministic
+// renewal window + the 20-day jitter spread, so the deterministic
 // per-agent renewal instant is never missed by more than half a day.
 const RENEWAL_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12h
 
@@ -222,16 +222,16 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 	let attempt = 0;
 	let stopped = false;
 	// Drawn once for this long-lived relay so co-located agents desynchronize their
-	// token refreshes across reconnects (D-4).
+	// token refreshes across reconnects.
 	const refreshMargin = jitteredRefreshMargin();
 	let lastDeps: IssueCertDeps | undefined;
-	// The cert-cache handle for the active ZERO-TRUST hook — the per-agent label
-	// (REQ-CERT-42), so every hook of an agent shares ONE wildcard cert cache.
-	// Hoisted so the standing renewal timer (AUD-D2) re-checks the SAME entry
+	// The cert-cache handle for the active ZERO-TRUST hook — the per-agent label,
+	// so every hook of an agent shares ONE wildcard cert cache.
+	// Hoisted so the standing renewal timer re-checks the SAME entry
 	// ensureCert wrote under.
 	let certHandle: string | undefined;
 	// Single-flight guard over ensureCert: the reconnect loop and the standing
-	// renewal timer (AUD-D2) both issue/renew the SAME per-agent wildcard, so they
+	// renewal timer both issue/renew the SAME per-agent wildcard, so they
 	// MUST NOT run concurrently (a double ACME order would burn the LE
 	// duplicate-cert budget). Whoever holds it wins; the other defers.
 	let certBusy = false;
@@ -247,10 +247,10 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 		if (renewalTimer) clearInterval(renewalTimer);
 	});
 
-	// (AUD-D2) Standing renewal re-check. The reconnect loop's ensureCert only runs
+	// Standing renewal re-check. The reconnect loop's ensureCert only runs
 	// on (re)connect, so a relay that stays connected past the 30-day renewal window
 	// would NEVER renew its per-agent wildcard until it next reconnects. This timer
-	// re-evaluates renewalDueWithJitter (the deterministic per-agent jitter, REQ-CERT-46)
+	// re-evaluates renewalDueWithJitter (the deterministic per-agent jitter)
 	// on a ~12h cadence and renews when due — guarded by certBusy so it never races
 	// the reconnect loop's ensureCert (a double order burns the LE duplicate-cert budget).
 	const startRenewalTimer = (): void => {
@@ -302,7 +302,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 			const hook = await resolveHook(client, agentId, opts.hook);
 			const { hostname, control_ws_url: controlWsUrl } = hook;
 
-			// (4) The per-request handler is IDENTICAL across tiers (REQ-SEC-20/21):
+			// (4) The per-request handler is IDENTICAL across tiers:
 			// HMAC-verify the RAW body → fetch keys → encrypt `hpke-v1` → self-send
 			// `rine.v1.webhook`. Only HOW the request bytes arrive differs (local TLS
 			// terminate for zero-trust; broker-forwarded plaintext for shared-edge).
@@ -320,11 +320,11 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 					req,
 				).then(() => undefined);
 
-			// Branch ONCE on the tier (REQ-TIER-03), BEFORE any label/FQDN derivation
-			// (relay F-4): the zero-trust agentLabel deriver hard-codes
+			// Branch ONCE on the tier, BEFORE any label/FQDN derivation:
+			// the zero-trust agentLabel deriver hard-codes
 			// `.hook.rine.network`, so a shared-edge `.edge` host must never reach it.
 			// Zero-trust defers its TLS listener to AFTER the tunnel connects (the
-			// lazy `ref` holder — orchestration order REQ-CLI-07: cert→tunnel→listener,
+			// lazy `ref` holder — orchestration order: cert→tunnel→listener,
 			// safe because no OPEN arrives before the holder is populated); shared-edge
 			// has no listener, so its `openLocalPipe` factory is ready immediately.
 			const ref: { live?: { openLocalPipe(frame: Frame): LocalPipe } } = {};
@@ -341,18 +341,18 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				emitLifecycle(json, { state: "shared_edge_ready", hostname });
 			} else if (hook.termination === "zero_trust") {
 				// Zero-trust: the cert handle is the per-agent label — the second-to-last
-				// DNS label before `.hook.rine.network` (REQ-CERT-42). One shared
+				// DNS label before `.hook.rine.network`. One shared
 				// `*.{agentLabel}.hook` wildcard covers every hook of the agent, so every
 				// hook-relay of that agent keys the SAME cert cache.
 				certHandle = agentLabel(hostname);
 
-				// (1) Cert provision/renew (REQ-CERT) — the private key stays local. The
+				// (1) Cert provision/renew — the private key stays local. The
 				// propagation poll targets the FQDN the backend returns from dns-challenge
 				// `set`, so the relay never needs the server's delegation_id up front.
 				// `certBusy` is a best-effort in-process guard that keeps the standing
-				// renewal timer (AUD-D2) from firing an overlapping ensureCert; the HARD
+				// renewal timer from firing an overlapping ensureCert; the HARD
 				// duplicate-cert guarantee is ensureCert's own cross-process per-agent
-				// issuance lock (AUD-B2/SCALE-4 — a second concurrent caller reuses the
+				// issuance lock (a second concurrent caller reuses the
 				// sibling's cert instead of firing a second ACME order).
 				lastDeps = await buildIssueCertDeps({
 					configDir,
@@ -396,7 +396,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				{ force: false, envToken: process.env.RINE_TOKEN, refreshMargin },
 			);
 
-			// (2) Control WS + mux tunnel (REQ-TUN). Bearer at the upgrade; the
+			// (2) Control WS + mux tunnel. Bearer at the upgrade; the
 			// backend validates the full org→agent→hostname chain.
 			const tunnel = await connectTunnel({
 				controlWsUrl,
@@ -419,17 +419,17 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				listener = live;
 				ref.live = live;
 
-				// (AUD-A1) The per-agent `*.{agentLabel}.hook` A record is a DELIVERY
+				// The per-agent `*.{agentLabel}.hook` A record is a DELIVERY
 				// prerequisite, NOT a cert-validation one (DNS-01 validates the independent
 				// challenge TXT), so a healthy cert can still be undeliverable if the
 				// backend's best-effort A write failed. Surface it LOUDLY (non-fatal: the
-				// backend self-heals the A on the next ZT-hook create, REQ-OPS-04). The
+				// backend self-heals the A on the next ZT-hook create). The
 				// shared-edge `.edge` host resolves via the server-managed static `*.edge`
 				// A, so there is no per-agent A to assert there.
 				await assertAgentARecord(hostname, json);
 				emitLifecycle(json, { state: "listener_ready", port: live.port });
 				// Arm the standing renewal re-check so a long-connected relay actually
-				// renews (AUD-D2). Shared-edge holds no cert, so it skips this.
+				// renews. Shared-edge holds no cert, so it skips this.
 				startRenewalTimer();
 			}
 			backoff = 1; // a clean re-establish resets the backoff
@@ -439,7 +439,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 			listener?.close();
 			if (stopped) break;
 
-			// WS dropped with no stop signal → reconnect (REQ-TUN-14). An orderly
+			// WS dropped with no stop signal → reconnect. An orderly
 			// broker close (1000/1001/bare drop) reconnects IMMEDIATELY with backoff
 			// reset to 1 (mirrors stream.ts:279); an abnormal close gets the jittered
 			// backoff so a flapping broker can't be hammered.
@@ -474,7 +474,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				return;
 			}
 			if (isRevoked(err)) {
-				// (REQ-CERT-44) Do NOT revoke/wipe the per-agent wildcard on a single
+				// Do NOT revoke/wipe the per-agent wildcard on a single
 				// hook's BIND-revoked — it is SHARED across every other live hook of the
 				// agent, so revoking here would kill all of them. The kill switch is
 				// server-side DNS+route teardown; the relay just exits.
@@ -570,9 +570,9 @@ class UnsupportedTierError extends Error {
 }
 
 /**
- * (AUD-A1) Assert the zero-trust hostname resolves to an A record before
+ * Assert the zero-trust hostname resolves to an A record before
  * declaring the listener ready. The per-agent `*.{agentLabel}.hook` A is a
- * DELIVERY prerequisite written best-effort by the backend (REQ-OPS-04); a
+ * DELIVERY prerequisite written best-effort by the backend; a
  * healthy cert does NOT imply a routable name (DNS-01 validates the independent
  * challenge TXT). Non-fatal — emit a loud `dns_a_missing` event and continue (the
  * cert is valid and the backend self-heals the A on the next ZT-hook create), so

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 
 /**
- * Persisted SSE stream cursor (REQ-SSE-05 / D-4).
+ * Persisted SSE stream cursor.
  *
  * `rine stream` keeps `lastEventId` in-process only, so every fresh process
  * (a new shell, a restarted CC-plugin monitor) reconnects cursorless and

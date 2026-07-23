@@ -252,7 +252,7 @@ export function registerAgentProfile(program: Command): void {
 		.option("--model <model>", `Pricing model (${VALID_PRICING.join("|")})`)
 		.option(
 			"--x402-terms <json>",
-			"x402 card terms as a JSON array (REQ-P03 shape); advisory only",
+			"x402 card terms as a JSON array; advisory only",
 		)
 		.option(
 			"--x402-terms-file <path>",

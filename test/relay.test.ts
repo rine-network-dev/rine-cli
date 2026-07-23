@@ -1,15 +1,15 @@
-// REQ-CLI-06/07/09 — the long-lived `rine relay` daemon. Structured on
+// The long-lived `rine relay` daemon. Structured on
 // stream.ts (NOT withClient): builds its client with createClient, resolves the
 // agent, installs a SIGINT handler that flips stopped=true + exitCode=0, and
 // runs a while(!stopped) reconnect loop with jittered backoff capped at 30s and
 // in-loop token refresh. At startup / each reconnect it orchestrates the four
-// subsystems IN ORDER: (1) cert provision/renew (REQ-CERT) → (2) control WS +
-// mux tunnel (REQ-TUN) → (3) local TLS-terminating listener → (4) per-request
-// verify/encrypt/post (REQ-CLI-08, owned by relay-adapter). Lifecycle events
+// subsystems IN ORDER: (1) cert provision/renew → (2) control WS +
+// mux tunnel → (3) local TLS-terminating listener → (4) per-request
+// verify/encrypt/post (owned by relay-adapter). Lifecycle events
 // mirror stream.ts emitLifecycle and NEVER carry a body.
 //
 // FROZEN-CONTRACT: the relay is CLI-only (never an MCP tool); the cert key stays
-// local (DNS-01 only); the relay calls the REQ-CERT/REQ-TUN entry points — it
+// local (DNS-01 only); the relay calls the cert/tunnel entry points — it
 // contains no inline ACME, no inline mux framing, no server crypto.
 //
 // All externals are MOCKED (the @rine-network/core boundary incl. the funnel
@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
 // Zero-trust hostname: TWO labels under `.hook.rine.network` — the per-hook
-// label (`github`) then the per-AGENT base32-UUID label (REQ-CERT-47), so the
+// label (`github`) then the per-AGENT base32-UUID label, so the
 // relay keys its cert cache by the second-to-last label (the agent label), and
 // ONE `*.{agentLabel}.hook` wildcard covers every hook of the agent. The agent
 // label here is `agent_label(11111111-…)` (Crockford base32 of the UUID bytes).
@@ -29,7 +29,7 @@ const AGENT_LABEL = "0h248h248h248h248h248h248h";
 const HOSTNAME = `github.${AGENT_LABEL}.hook.rine.network`;
 // The broker control-WS endpoint the server returns in the hook row. The relay
 // MUST dial this VERBATIM — NOT a value synthesized from the API base (which
-// resolves to the primary IP / Caddy, with no funnel route — F1).
+// resolves to the primary IP / Caddy, with no funnel route).
 const CONTROL_WS_URL = "wss://funnel.rine.network/_funnel/v1";
 
 // Mirror the production funnel contracts so the mock call-argument tuples are
@@ -93,8 +93,8 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		buildIssueCertDeps: vi.fn(async () => ({})),
 		ensureCert: (...a: unknown[]) => mockEnsureCert(...(a as [CertArgs])),
 		nextBackoffDelayMs: vi.fn(() => 1000),
-		// The standing renewal re-check (AUD-D2) reads cert meta and the per-agent
-		// jittered renewal trigger (REQ-CERT-46). Default: a far-future cert that is
+		// The standing renewal re-check reads cert meta and the per-agent
+		// jittered renewal trigger. Default: a far-future cert that is
 		// never due, so the timer never fires an overlapping ensureCert in these tests.
 		loadMeta: vi.fn(() => ({ not_after: "2099-01-01T00:00:00Z" })),
 		renewalDueWithJitter: vi.fn(() => false),
@@ -112,7 +112,7 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 });
 
 // The relay asserts the per-agent wildcard A resolves before declaring the
-// listener ready (AUD-A1); default to a present A so the happy path proceeds.
+// listener ready; default to a present A so the happy path proceeds.
 vi.mock("node:dns/promises", () => ({
 	resolve4: vi.fn(async () => ["203.0.113.7"]),
 }));
@@ -218,9 +218,9 @@ afterEach(() => {
 	process.exitCode = undefined;
 });
 
-// ── REQ-CLI-06: flags + SIGINT clean exit ───────────────────────────────────
+// ── flags + SIGINT clean exit ───────────────────────────────────────────────
 
-describe("rine relay — command shape & flags (REQ-CLI-06)", () => {
+describe("rine relay — command shape & flags", () => {
 	it("registers a flat `relay` command with the documented flags", () => {
 		const program = makeProgram();
 		const relay = program.commands.find((c) => c.name() === "relay");
@@ -245,7 +245,7 @@ describe("rine relay — command shape & flags (REQ-CLI-06)", () => {
 	});
 });
 
-describe("rine relay — fatal startup gates (REQ-CLI-06 edge cases)", () => {
+describe("rine relay — fatal startup gates (edge cases)", () => {
 	it("fails with exit code 2 when the agent's identity keys are absent (no loop entry)", async () => {
 		mockAgentKeysExist.mockReturnValue(false);
 		const program = makeProgram({});
@@ -269,9 +269,9 @@ describe("rine relay — fatal startup gates (REQ-CLI-06 edge cases)", () => {
 	});
 });
 
-// ── REQ-CLI-07: orchestration order ─────────────────────────────────────────
+// ── orchestration order ─────────────────────────────────────────────────────
 
-describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
+describe("rine relay — startup orchestration order", () => {
 	it("provisions the cert, THEN opens the tunnel, THEN starts the local TLS listener", async () => {
 		const program = makeProgram({});
 		await program.parseAsync(["node", "rine", "relay", "--agent", AGENT_ID]);
@@ -293,7 +293,7 @@ describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
 			AGENT_ID,
 			"--staging",
 		]);
-		// ensureCert is invoked with options carrying staging:true (REQ-CERT-11).
+		// ensureCert is invoked with options carrying staging:true.
 		const call = mockEnsureCert.mock.calls[0]?.[0] as
 			| { options?: { staging?: boolean } }
 			| undefined;
@@ -306,7 +306,7 @@ describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
 		// The cert handle must be the AGENT label — the second-to-last DNS label of
 		// the zero-trust hostname (`{hook}.{agentLabel}.hook.rine.network`) — so the
 		// per-agent `*.{agentLabel}.hook` wildcard covers GitHub's TLS SNI and ONE
-		// cert serves every hook of the agent (REQ-CERT-42/47). NEVER the raw UUID
+		// cert serves every hook of the agent. NEVER the raw UUID
 		// (the relay reads the opaque label off the hostname, never re-encodes it).
 		const certCall = mockEnsureCert.mock.calls[0]?.[0] as
 			| { handle?: string }
@@ -315,7 +315,7 @@ describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
 		expect(certCall?.handle).not.toBe(AGENT_ID);
 		// And the tunnel BINDs the full server hostname verbatim AND dials the
 		// server-returned control_ws_url verbatim — NOT a value synthesized from
-		// the API base (which has no funnel route — F1).
+		// the API base (which has no funnel route).
 		const tunnelCall = mockConnectTunnel.mock.calls[0]?.[0] as
 			| { hostname?: string; controlWsUrl?: string }
 			| undefined;
@@ -348,9 +348,9 @@ describe("rine relay — startup orchestration order (REQ-CLI-07)", () => {
 	});
 });
 
-// ── REQ-CLI-09: lifecycle events (stream.ts shape, never a body) ────────────
+// ── lifecycle events (stream.ts shape, never a body) ────────────────────────
 
-describe("rine relay — lifecycle events (REQ-CLI-09)", () => {
+describe("rine relay — lifecycle events", () => {
 	it("emits cert_ready, tunnel_connected and stopped in the emitLifecycle JSON shape", async () => {
 		const out = captureStdout();
 		const program = makeProgram({ json: true });
@@ -430,7 +430,7 @@ describe("rine relay — lifecycle events (REQ-CLI-09)", () => {
 		expect(reconnecting?.data.backoff_ms as number).toBeGreaterThan(0);
 	});
 
-	it("a CLEAN server close reconnects immediately (backoff_ms 0), not with a jittered delay (M1/REQ-TUN-14)", async () => {
+	it("a CLEAN server close reconnects immediately (backoff_ms 0), not with a jittered delay", async () => {
 		let calls = 0;
 		mockConnectTunnel.mockImplementation(async () => {
 			calls++;
@@ -479,7 +479,7 @@ describe("rine relay — lifecycle events (REQ-CLI-09)", () => {
 		expect(reconnect?.data.backoff_ms).toBe(0);
 	});
 
-	it("an ABNORMAL server close backs off with a jittered delay (M1/REQ-TUN-14)", async () => {
+	it("an ABNORMAL server close backs off with a jittered delay", async () => {
 		let calls = 0;
 		mockConnectTunnel.mockImplementation(async () => {
 			calls++;
@@ -560,7 +560,7 @@ describe("rine relay — lifecycle events (REQ-CLI-09)", () => {
 		expect(process.exitCode).not.toBe(0);
 	});
 
-	it("no lifecycle event ever carries a request body or the HMAC secret (REQ-SEC-15)", async () => {
+	it("no lifecycle event ever carries a request body or the HMAC secret", async () => {
 		const out = captureStdout();
 		const program = makeProgram({ json: true });
 		await program.parseAsync([

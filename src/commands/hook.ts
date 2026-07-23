@@ -1,4 +1,4 @@
-// REQ-CLI-01..05 — the `rine hook` CRUD command group for the inbound webhook
+// The `rine hook` CRUD command group for the inbound webhook
 // funnel. Structured on the existing `rine webhook` group (webhook.ts): every
 // sub-command runs through `withClient`, resolves the agent the same way, and
 // reuses the shared output helpers — no reimplemented CRUD or output logic.
@@ -38,7 +38,7 @@ const CONTENT_TYPE = "application/json";
 // User-facing `--tier` values are hyphenated (`zero-trust`/`shared-edge`); the
 // wire/DB enum (FunnelTier) is underscored. This is the ONLY place that maps the
 // two spellings — the CLI never recomputes the default tier (omitting --tier
-// sends null and the backend's _default_tier_for_trust resolves it, AUD-F5).
+// sends null and the backend's _default_tier_for_trust resolves it).
 const TIER_CLI_TO_WIRE: Readonly<Record<string, FunnelTier>> =
 	Object.fromEntries(FUNNEL_TIERS.map((t) => [t.replace("_", "-"), t]));
 
@@ -72,7 +72,7 @@ export function registerHook(program: Command): void {
 		.option("--name <name>", "Hook name (default: default)", "default")
 		// TLS-termination tier. Omitting it sends null and the backend resolves the
 		// default for the org's trust tier — the CLI never recomputes that default
-		// (AUD-F5). `.choices` validates client-side; `resolveTier` maps to the wire.
+		// `.choices` validates client-side; `resolveTier` maps to the wire.
 		.addOption(
 			new Option(
 				"--tier <tier>",
@@ -111,7 +111,7 @@ export function registerHook(program: Command): void {
 					// Generate + persist the secret BEFORE the POST (the allocation is
 					// non-idempotent): on a POST failure we delete it so no orphan secret
 					// survives an unallocated hook. `tier: null` means "let the backend
-					// resolve the default for the org's trust tier" (REQ-TIER-02, AUD-F5).
+					// resolve the default for the org's trust tier".
 					const secret = generateHookSecret();
 					saveHookSecret(configDir, agentId, opts.name, secret);
 					let created: HookCreated;
@@ -195,7 +195,7 @@ export function registerHook(program: Command): void {
 					try {
 						await client.delete(`/agents/${agentId}/funnel/hooks/${opts.name}`);
 					} catch (err) {
-						// REQ-CLI-05: an unknown hook is success-idempotent ONLY under
+						// An unknown hook is success-idempotent ONLY under
 						// --yes — purge any stale local secret and report it absent. Without
 						// --yes the 404 surfaces so an explicit delete of a typo'd name fails
 						// loudly rather than silently "succeeding".

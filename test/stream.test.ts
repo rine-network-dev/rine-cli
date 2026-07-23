@@ -42,6 +42,11 @@ vi.mock("../src/commands/stream-cursor.js", () => ({
 import { createEventSource } from "eventsource-client";
 import { Command } from "commander";
 import { registerStream } from "../src/commands/stream.js";
+import {
+	agentKeysExist,
+	decryptGroupMessage,
+	decryptMessage,
+} from "@rine-network/core";
 import { loadStreamCursor, saveStreamCursor } from "../src/commands/stream-cursor.js";
 
 const mockCreateEventSource = vi.mocked(createEventSource);
@@ -544,7 +549,7 @@ describe("rine stream", () => {
 		});
 	});
 
-	describe("cursor persistence (REQ-SSE-05)", () => {
+	describe("cursor persistence", () => {
 		it("loads the persisted cursor for the resolved agent on startup", async () => {
 			mockCreateEventSource.mockImplementationOnce(makeMockEs(() => {
 				Promise.resolve().then(() => fireSigint());
@@ -607,6 +612,142 @@ describe("rine stream", () => {
 			await program.parseAsync(["node", "rine", "stream", "--json"]);
 
 			expect(mockSaveCursor).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("message preview decryption", () => {
+		const mockAgentKeysExist = vi.mocked(agentKeysExist);
+		const mockDecryptGroup = vi.mocked(decryptGroupMessage);
+		const mockDecryptDm = vi.mocked(decryptMessage);
+
+		const decrypted = (plaintext: string) =>
+			({
+				plaintext,
+				senderKid: "agent-2:sig",
+				verified: true,
+				verificationStatus: "verified",
+			}) as unknown as Awaited<ReturnType<typeof decryptMessage>>;
+
+		beforeEach(() => {
+			mockAgentKeysExist.mockReset();
+			mockAgentKeysExist.mockReturnValue(true);
+			mockDecryptGroup.mockReset();
+			mockDecryptDm.mockReset();
+		});
+
+		afterEach(() => {
+			mockAgentKeysExist.mockReset();
+			mockAgentKeysExist.mockReturnValue(false);
+			mockDecryptGroup.mockReset();
+			mockDecryptDm.mockReset();
+		});
+
+		async function previewOf(payload: Record<string, unknown>): Promise<string> {
+			const out = captureStdout();
+			const stderr = captureStderr();
+
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				Promise.resolve().then(() => {
+					opts.onMessage({
+						event: "message",
+						data: JSON.stringify(payload),
+						id: null,
+					});
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream"]);
+			// The preview is formatted asynchronously and can settle after the
+			// SIGINT-terminated loop returns — drain the queue before asserting.
+			for (let i = 0; i < 5; i++) {
+				await new Promise((r) => setImmediate(r));
+			}
+			out.restore();
+			stderr.restore();
+
+			return out.lines.join("\n");
+		}
+
+		it("decrypts an mls-v1 group message", async () => {
+			mockDecryptGroup.mockResolvedValue(decrypted("group-mls-hello"));
+
+			const line = await previewOf({
+				type: "rine.v1.group_message",
+				group_id: "group-1",
+				group_handle: "team",
+				encryption_version: "mls-v1",
+				encrypted_payload: "AQID",
+			});
+
+			expect(mockDecryptGroup).toHaveBeenCalledWith(
+				"/fake/config",
+				"agent-1",
+				"group-1",
+				"AQID",
+				expect.anything(),
+			);
+			expect(line).toContain("[\u2713] group-mls-hello");
+		});
+
+		it("decrypts an hpke-hybrid-v1 direct message", async () => {
+			mockDecryptDm.mockResolvedValue(decrypted("dm-hybrid-hello"));
+
+			const line = await previewOf({
+				type: "rine.v1.dm",
+				encryption_version: "hpke-hybrid-v1",
+				encrypted_payload: "AwQF",
+			});
+
+			expect(mockDecryptDm).toHaveBeenCalledWith(
+				"/fake/config",
+				"agent-1",
+				"AwQF",
+				expect.anything(),
+			);
+			expect(line).toContain("[\u2713] dm-hybrid-hello");
+		});
+
+		it("reports [decrypt failed] when an mls-v1 group message cannot be decrypted", async () => {
+			mockDecryptGroup.mockRejectedValue(new Error("No MLS state for group"));
+
+			const line = await previewOf({
+				type: "rine.v1.group_message",
+				group_id: "group-1",
+				encryption_version: "mls-v1",
+				encrypted_payload: "AQID",
+			});
+
+			expect(line).toContain("[decrypt failed]");
+			expect(line).not.toContain("[encrypted]");
+		});
+
+		it("reports [decrypt failed] when an hpke-hybrid-v1 message cannot be decrypted", async () => {
+			mockDecryptDm.mockRejectedValue(new Error("no PQ encryption key"));
+
+			const line = await previewOf({
+				type: "rine.v1.dm",
+				encryption_version: "hpke-hybrid-v1",
+				encrypted_payload: "AwQF",
+			});
+
+			expect(line).toContain("[decrypt failed]");
+			expect(line).not.toContain("[encrypted]");
+		});
+
+		it("leaves an unsupported encryption version as [encrypted]", async () => {
+			const line = await previewOf({
+				type: "rine.v1.dm",
+				encryption_version: "hpke-org-v1",
+				encrypted_payload: "AwQF",
+			});
+
+			expect(line).toContain("[encrypted]");
+			expect(mockDecryptDm).not.toHaveBeenCalled();
+			expect(mockDecryptGroup).not.toHaveBeenCalled();
 		});
 	});
 });

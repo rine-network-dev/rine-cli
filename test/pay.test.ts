@@ -1,4 +1,4 @@
-// REQ-M02 — `rine pay <message-id>`. Drives the REAL command end-to-end against a
+// `rine pay <message-id>`. Drives the REAL command end-to-end against a
 // real temp configDir: the wallet key, spend policy, requirement selection,
 // EIP-712 signing and spend accounting all run for real in rine-core. Only the
 // network/crypto boundary is mocked — the peer-keyed decrypt of the quote, the
@@ -166,7 +166,7 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		expect(s).not.toContain(EURC);
 	});
 
-	it("R-1: stamps the answered quote's message id into the signed payload", async () => {
+	it("stamps the answered quote's message id into the signed payload", async () => {
 		await run("pay", MESSAGE_ID);
 		// The PaymentPayload we sealed carries the quote-ref extension so the payee
 		// can bind this settlement to the ONE quote it authored.

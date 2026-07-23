@@ -1,4 +1,4 @@
-// REQ-M02 — `rine wallet create|address|policy` command group. These tests drive
+// `rine wallet create|address|policy` command group. These tests drive
 // the REAL commands via Commander.parseAsync against a real temp configDir, so
 // the rine-core wallet/policy primitives (createWallet, getWalletAddress,
 // loadPolicy/savePolicy) run for real; only the network/auth boundary is mocked.

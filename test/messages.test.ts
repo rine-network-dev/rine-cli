@@ -95,7 +95,7 @@ function makeProgram(globalOpts: Record<string, unknown> = {}): Command {
 	return program;
 }
 
-describe("thread command — role-tagged transcript (T-CLI-1, REQ-TOOL-01)", () => {
+describe("thread command — role-tagged transcript", () => {
 	const CONV_ID = "conv-7";
 	const THREAD_ENTRIES = [
 		{
@@ -119,7 +119,7 @@ describe("thread command — role-tagged transcript (T-CLI-1, REQ-TOOL-01)", () 
 	beforeEach(() => {
 		// The conversations endpoint returns the both-sided page; decryptThreadRow
 		// is unit-covered in rine-core, so stub it to the rendered entries here and
-		// assert on the CLI-layer rendering (REQ-TOOL-01: decrypted tool OUTPUT).
+		// assert on the CLI-layer rendering (decrypted tool OUTPUT).
 		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
 			(path: string) => {
 				if (path === `/conversations/${CONV_ID}/messages`) {

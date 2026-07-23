@@ -1,7 +1,7 @@
-// REQ-M04 / R-1 — `rine fulfill <message-id>`. Drives the REAL command: fetch the
+// `rine fulfill <message-id>`. Drives the REAL command: fetch the
 // payment message → parse the decrypted x402_payment (real `parseX402Payload`) →
 // resolve the payee-owned requirement + settle via rine-core's SHARED
-// `resolvePayeeRequirement`/`settleToReceipt` (the R-1 ref-bind + reconcile +
+// `resolvePayeeRequirement`/`settleToReceipt` (the ref-bind + reconcile +
 // verify/settle ladder, unit-tested exhaustively in rine-core) → build + send the
 // receipt in-thread (real `buildReceiptMessage`/marker discipline). This lane owns
 // the CLI wiring: it asserts the command forwards the right inputs to the shared
@@ -21,7 +21,7 @@ const API_URL = "https://test.rine.network";
 const PAYER = "11111111-1111-1111-1111-111111111111";
 const PAYEE = "22222222-2222-2222-2222-222222222222";
 const MESSAGE_ID = "payment-msg-1";
-// The quote message the payment answers (R-1 ref) — carried in the signed payload.
+// The quote message the payment answers — carried in the signed payload.
 const QUOTE_ID = "quote-msg-1";
 const QUOTE_REF = core.X402_QUOTE_REF_KEY;
 const EURC = "0x0000000000000000000000000000000000000001";
@@ -30,7 +30,7 @@ const REGISTRY_EURC = "0x808456652fdb597867f38412077a9182bf77359f";
 const SEPOLIA = "eip155:84532";
 
 // A verbatim x402 PaymentPayload (signed authorization) received by the payee. By
-// default it stamps the answered-quote ref (R-1); pass `{}` extensions to model an
+// default it stamps the answered-quote ref; pass `{}` extensions to model an
 // older payer that omitted it.
 function payment(
 	acceptedOverrides: Record<string, unknown> = {},
@@ -171,7 +171,7 @@ beforeEach(() => {
 				verificationStatus: "verified",
 			}) as never,
 	);
-	// The R-1 ref-bind + reconcile + verify/settle ladder AND the receipt reply both
+	// The ref-bind + reconcile + verify/settle ladder AND the receipt reply both
 	// live (and are exhaustively tested) in rine-core — mock their public seams so
 	// the CLI's own routing (which receipt for which outcome) is what's under test.
 	vi.spyOn(core, "resolvePayeeRequirement").mockResolvedValue(resolved());
@@ -222,7 +222,7 @@ describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => 
 		expect(process.exitCode).toBeUndefined();
 	});
 
-	it("binds the settle to the answered payment + conversation + payee (R-1 wiring)", async () => {
+	it("binds the settle to the answered payment + conversation + payee", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		const resolveArg = (
 			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
@@ -234,7 +234,7 @@ describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => 
 		};
 		// The verbatim payment the payee received is what gets reconciled…
 		expect(resolveArg.payment.payload.authorization.from).toBe(PAYER);
-		// …bound to THIS conversation and THIS payee (the real R-1 binding inputs).
+		// …bound to THIS conversation and THIS payee (the real binding inputs).
 		expect(resolveArg.conversationId).toBe("conv-1");
 		expect(resolveArg.payeeAgentId).toBe(PAYEE);
 		// No operator override supplied → the ref path is taken.
@@ -253,7 +253,7 @@ describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => 
 		expect(settleArgs?.[1]).toEqual(resolved());
 	});
 
-	it("R-1: surfaces the matched quote (id + amount + asset + network) in the result", async () => {
+	it("surfaces the matched quote (id + amount + asset + network) in the result", async () => {
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		expect(lastJson().matched_quote).toEqual({
 			message_id: QUOTE_ID,
@@ -298,7 +298,7 @@ describe("rine fulfill — typed refusal routing (fail closed)", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("threads a terminal payment-failed receipt to the payer on refusal (finding #2)", async () => {
+	it("threads a terminal payment-failed receipt to the payer on refusal", async () => {
 		(
 			core.resolvePayeeRequirement as ReturnType<typeof vi.fn>
 		).mockRejectedValue(
@@ -389,7 +389,7 @@ describe("rine fulfill — explicit expected-terms override (out-of-band quote)"
 	});
 });
 
-describe("rine fulfill — marker discipline (REQ-X03)", () => {
+describe("rine fulfill — marker discipline", () => {
 	it("forwards emitMarker=true by default so core emits the status marker", async () => {
 		// The cleartext {status,rail} marker byte-shape + its economic-leak freedom
 		// are unit-tested in rine-core's buildReceiptMessage; the CLI's job is only to
@@ -445,14 +445,14 @@ describe("rine fulfill — failure branches (typed outcomes)", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("F-4: threads a graceful payment-failed receipt on a malformed payload (no crash)", async () => {
+	it("threads a graceful payment-failed receipt on a malformed payload (no crash)", async () => {
 		paymentPlaintext = JSON.stringify({ payload: {} }); // no `accepted`
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		// The malformed payload never reaches the resolver/settle ladder…
 		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
 		expect(core.settleToReceipt).not.toHaveBeenCalled();
 		// …but the payer still reaches a terminal payment-failed state via a refusal
-		// receipt built from the shared refusalReceiptBody (finding #10 — empty
+		// receipt built from the shared refusalReceiptBody (empty
 		// network/payer since the payload could not even be parsed).
 		expect(core.sendReceipt).toHaveBeenCalledTimes(1);
 		expect(receiptParams?.receiptBody).toMatchObject({

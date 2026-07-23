@@ -1,4 +1,4 @@
-// REQ-M02 (payee send) + REQ-D03 (card terms). `rine send --type
+// Payee send + card terms. `rine send --type
 // rine.v1.x402_payment_required` must attach the x402 cleartext extras
 // (content_type/payload_schema + status marker) via rine-core's build layer;
 // `rine agent set-pricing` must write rine.x402.terms while leaving the
@@ -158,9 +158,9 @@ describe("rine send — x402 payment_required attaches cleartext extras", () => 
 	});
 });
 
-// ── REQ-D03: rine agent set-pricing --x402-terms ────────────────────────────
+// ── rine agent set-pricing --x402-terms ─────────────────────────────────────
 
-describe("rine agent set-pricing — x402 terms (REQ-D03)", () => {
+describe("rine agent set-pricing — x402 terms", () => {
 	let putBody: Record<string, unknown> | undefined;
 
 	const TERMS = [

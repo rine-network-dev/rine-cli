@@ -1,4 +1,4 @@
-// REQ-SPF-10 — `rine verify-identity` proves control of a SPIFFE identity for an
+// `rine verify-identity` proves control of a SPIFFE identity for an
 // agent and elevates the org to trust tier 2. A thin Commander wrapper over the
 // core `verifyIdentitySpiffe`: it only resolves which agent to use and renders
 // the typed result. All the challenge → SVID → verify-svid orchestration lives in

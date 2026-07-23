@@ -1,4 +1,4 @@
-// REQ-CLI-01..05 — `rine hook` CRUD command group (client-side HMAC secret).
+// The `rine hook` CRUD command group (client-side HMAC secret).
 //
 // FROZEN-CONTRACT invariants asserted here (a violation is a build defect):
 //  - The HMAC secret is generated CLIENT-SIDE (randomBytes(32) hex, 64 chars)
@@ -94,9 +94,9 @@ function captureStdout(): { lines: string[] } {
 	return { lines };
 }
 
-// ── REQ-CLI-01: command group shape ─────────────────────────────────────────
+// ── command group shape ─────────────────────────────────────────────────────
 
-describe("rine hook — command group (REQ-CLI-01)", () => {
+describe("rine hook — command group", () => {
 	it("registers exactly create, list and delete subcommands", () => {
 		const program = makeProgram();
 		const hook = program.commands.find((c) => c.name() === "hook");
@@ -112,9 +112,9 @@ describe("rine hook — command group (REQ-CLI-01)", () => {
 	});
 });
 
-// ── REQ-CLI-02 / REQ-CLI-04: client-side secret, body-has-no-secret ─────────
+// ── client-side secret, body-has-no-secret ──────────────────────────────────
 
-describe("rine hook create — client-side secret never sent to rine (REQ-CLI-02)", () => {
+describe("rine hook create — client-side secret never sent to rine", () => {
 	it("POST body is exactly {hook_name} — no secret key is ever present", async () => {
 		let postBody: Record<string, unknown> | undefined;
 		const post = vi
@@ -138,7 +138,7 @@ describe("rine hook create — client-side secret never sent to rine (REQ-CLI-02
 
 		expect(post).toHaveBeenCalledTimes(1);
 		// The body carries the name + the termination tier (null = "backend default",
-		// resolved by _default_tier_for_trust — the CLI never recomputes it, AUD-F5),
+		// resolved by _default_tier_for_trust — the CLI never recomputes it),
 		// and NOTHING that looks like a secret.
 		expect(postBody).toBeDefined();
 		expect(postBody).toEqual({ hook_name: "github", tier: null });
@@ -214,7 +214,7 @@ describe("rine hook create — client-side secret never sent to rine (REQ-CLI-02
 	});
 });
 
-describe("rine hook create — local secret persistence (REQ-CLI-04)", () => {
+describe("rine hook create — local secret persistence", () => {
 	it("writes {configDir}/funnel/{agentId}/{name}.secret with mode 0600 in a 0700 dir", async () => {
 		vi.spyOn(core.HttpClient.prototype, "post").mockResolvedValue(
 			hookCreated(),
@@ -291,9 +291,9 @@ describe("rine hook create — local secret persistence (REQ-CLI-04)", () => {
 	});
 });
 
-// ── REQ-CLI-03: print-once GitHub block + JSON shape ────────────────────────
+// ── print-once GitHub block + JSON shape ────────────────────────────────────
 
-describe("rine hook create — print-once setup (REQ-CLI-03)", () => {
+describe("rine hook create — print-once setup", () => {
 	it("--json emits the secret, the server hostname verbatim, the public URL and signature header", async () => {
 		const out = captureStdout();
 		vi.spyOn(core.HttpClient.prototype, "post").mockResolvedValue(
@@ -382,9 +382,9 @@ describe("rine hook create — print-once setup (REQ-CLI-03)", () => {
 	});
 });
 
-// ── REQ-CLI-02 edge cases: 409 / 403 ────────────────────────────────────────
+// ── edge cases: 409 / 403 ───────────────────────────────────────────────────
 
-describe("rine hook create — server rejections (REQ-CLI-02 edge cases)", () => {
+describe("rine hook create — server rejections (edge cases)", () => {
 	it("on 409 (name exists) exits non-zero and writes no local secret", async () => {
 		vi.spyOn(core.HttpClient.prototype, "post").mockRejectedValue(
 			new core.RineApiError(409, "Funnel hook already exists"),
@@ -435,9 +435,9 @@ describe("rine hook create — server rejections (REQ-CLI-02 edge cases)", () =>
 	});
 });
 
-// ── REQ-CLI-05: list / delete ───────────────────────────────────────────────
+// ── list / delete ───────────────────────────────────────────────────────────
 
-describe("rine hook list (REQ-CLI-05)", () => {
+describe("rine hook list", () => {
 	it("calls GET /agents/{agentId}/funnel/hooks and never emits a secret", async () => {
 		const out = captureStdout();
 		// Pre-seed a local secret to prove `list` never reads or prints it.
@@ -481,7 +481,7 @@ describe("rine hook list (REQ-CLI-05)", () => {
 	});
 });
 
-describe("rine hook delete (REQ-CLI-05)", () => {
+describe("rine hook delete", () => {
 	beforeEach(() => {
 		fs.mkdirSync(join(CONFIG_DIR, "funnel", AGENT_ID), {
 			recursive: true,
