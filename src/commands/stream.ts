@@ -1,26 +1,33 @@
 import type { Command } from "commander";
 import { createEventSource } from "eventsource-client";
 import { createClient } from "../action.js";
+import { actorLadder } from "../acting-agent.js";
+import { actorOption, namedActor } from "../actor.js";
 import {
   type HttpClient,
+  SENDER_KEY_UNAVAILABLE_PREVIEW,
+  type SenderKeyExplainer,
+  type SenderKeyUnavailableError,
   agentKeysExist,
-  decryptGroupMessage,
+  asSenderKeyUnavailable,
+  decryptGroupMessageWithRecovery,
   decryptMessage,
-  fetchAgents,
   formatError,
   getOrRefreshToken,
   ingestSenderKeyDistribution,
+  isAuthenticityFailure,
   jitteredRefreshMargin,
-  resolveAgent,
   resolveApiUrl,
   resolveConfigDir,
+  senderKeyExplainer,
 } from "@rine-network/core";
-import { fetchAndIngestPendingSKDistributions } from "./sender-key-ops.js";
 import { loadStreamCursor, saveStreamCursor } from "./stream-cursor.js";
 import { printError } from "../output.js";
 import type { GlobalOpts } from "../types.js";
 
 interface MessageData {
+  /** The row's own id — what `rine message read` takes, on the one line that offers it. */
+  id?: string;
   created_at?: string;
   sender_handle?: string;
   from_agent_id?: string;
@@ -65,6 +72,11 @@ function jitteredDelayMs(backoffSeconds: number): number {
  * Encryption versions the stream preview can decrypt. A payload carrying one of
  * these that still fails is reported as "[decrypt failed]" rather than the
  * misleading "[encrypted]", which is reserved for versions we never attempt.
+ *
+ * One failure says more than that: a group message whose sender key never
+ * arrived reports {@link SENDER_KEY_UNAVAILABLE_PREVIEW}, which names the cause
+ * and the move. Every other failure keeps the generic line, because nothing
+ * here knows enough about it to say anything truer.
  */
 const DECRYPTABLE_VERSIONS = new Set([
   "hpke-v1",
@@ -73,12 +85,28 @@ const DECRYPTABLE_VERSIONS = new Set([
   "mls-v1",
 ]);
 
+/**
+ * One rendered stream line, plus — at most once per `rine stream` — the
+ * paragraph that says why a group message could not be opened.
+ *
+ * The paragraph does not go IN the line. This stream is line-oriented and
+ * consumed by monitors that read one message per line; a ~600-character
+ * sentence spliced into a preview corrupts that for every reader of the stream,
+ * so it goes beside the line instead, on the channel that is already not the
+ * message channel (stderr, via `printError`).
+ */
+interface StreamLine {
+  readonly line: string;
+  readonly notice: string | null;
+}
+
 async function formatMessageLine(
   dataStr: string,
   agentId: string,
   configDir: string,
   client: HttpClient,
-): Promise<string> {
+  explain: SenderKeyExplainer,
+): Promise<StreamLine> {
   try {
     const data = JSON.parse(dataStr) as MessageData;
     const ts = (data.created_at ?? "").slice(0, 19) || "?";
@@ -89,51 +117,47 @@ async function formatMessageLine(
       : msgType;
 
     let preview = "[encrypted]";
-    if (data.encrypted_payload && agentKeysExist(configDir, agentId)) {
+    let notice: string | null = null;
+    // The envelope's claim of authorship is checked against the sender the
+    // server authenticated on the event. An event without one carries nothing
+    // to check it against, so its payload is left sealed.
+    const fromAgentId = data.from_agent_id;
+    if (
+      data.encrypted_payload &&
+      fromAgentId &&
+      agentKeysExist(configDir, agentId)
+    ) {
       let result: Awaited<ReturnType<typeof decryptMessage>> | undefined;
+      // Set when the one-shot recovery has had its turn and the sender key
+      // still is not here — the one decrypt failure this preview can explain,
+      // and it carries the sentence the paragraph is made of.
+      let unavailable: SenderKeyUnavailableError | null = null;
 
-      // Group ciphertext: decryptGroupMessage dispatches on the version
-      // byte (sender-key vs MLS) and self-heals MLS state internally
-      // (welcomes + epoch sync), so only the sender-key ingest retry is
-      // driven from here.
+      // Group ciphertext: the group decrypt dispatches on the version byte
+      // (sender-key vs MLS) and self-heals MLS state internally (welcomes +
+      // epoch sync), so the sender-key ingest retry is the only recovery this
+      // path asks for — and core owns that one.
       if (
         (data.encryption_version === "sender-key-v1" ||
           data.encryption_version === "mls-v1") &&
         data.group_id
       ) {
         try {
-          result = await decryptGroupMessage(
+          // The ingest-and-retry is core's, not a third copy of it here: both
+          // ways it can end — the scan found nothing, or it found keys but not
+          // this one — come back as the one refusal, and `[decrypt failed]`
+          // names neither the cause nor the thing that fixes it.
+          result = await decryptGroupMessageWithRecovery(
+            client,
             configDir,
             agentId,
             data.group_id,
             data.encrypted_payload,
-            client,
+            fromAgentId,
           );
         } catch (err) {
-          const match =
-            err instanceof Error &&
-            err.message.match(/^unknown sender key id: (.+)$/);
-          if (match) {
-            const ingested = await fetchAndIngestPendingSKDistributions(
-              client,
-              configDir,
-              agentId,
-              match[1],
-            );
-            if (ingested > 0) {
-              try {
-                result = await decryptGroupMessage(
-                  configDir,
-                  agentId,
-                  data.group_id,
-                  data.encrypted_payload,
-                  client,
-                );
-              } catch {
-                /* retry exhausted */
-              }
-            }
-          }
+          // Any other failure stays the generic line.
+          unavailable = asSenderKeyUnavailable(err, data.group_id);
         }
       } else if (
         data.encryption_version === "hpke-v1" ||
@@ -145,13 +169,21 @@ async function formatMessageLine(
             agentId,
             data.encrypted_payload,
             client,
+            fromAgentId,
           );
         } catch {
           /* decrypt failed */
         }
       }
 
-      if (result) {
+      if (result && isAuthenticityFailure(result.verificationStatus)) {
+        // Tampered bytes, or content signed by someone other than the sender
+        // the server authenticated: never previewed under that sender's name.
+        preview =
+          result.verificationStatus === "sender-mismatch"
+            ? "[\u2717 sender mismatch]"
+            : "[\u2717 invalid signature]";
+      } else if (result?.plaintext !== undefined) {
         ingestSenderKeyDistribution(
           configDir,
           agentId,
@@ -160,14 +192,30 @@ async function formatMessageLine(
         );
         const verified = result.verified ? "\u2713" : "?";
         preview = `[${verified}] ${result.plaintext.slice(0, 60)}`;
+      } else if (unavailable !== null) {
+        // The line always carries the bounded marker; the explanation, if this
+        // stream has not given it yet, rides beside it as its own notice.
+        //
+        // The marker's whole premise is that the full sentence is one `rine
+        // message read` away, and every other MULTI surface hands the operator
+        // the id that read needs. A stream line did not: an operator who
+        // scrolled past the once-per-stream notice had to run `rine message
+        // list` and correlate by timestamp to get back to it. The id is this
+        // reader's own delivery and discloses nothing the row did not, and the
+        // marker stays byte-identical so no one can count distinct keys off a
+        // stream.
+        preview = data.id
+          ? `${SENDER_KEY_UNAVAILABLE_PREVIEW} rine message read ${data.id}`
+          : SENDER_KEY_UNAVAILABLE_PREVIEW;
+        notice = explain(unavailable.message).notice;
       } else if (DECRYPTABLE_VERSIONS.has(data.encryption_version ?? "")) {
         preview = "[decrypt failed]";
       }
     }
 
-    return `[${ts}] ${sender} \u2192 ${target}: ${preview}`;
+    return { line: `[${ts}] ${sender} \u2192 ${target}: ${preview}`, notice };
   } catch {
-    return `[message] ${dataStr.slice(0, 80)}`;
+    return { line: `[message] ${dataStr.slice(0, 80)}`, notice: null };
   }
 }
 
@@ -175,7 +223,9 @@ export function registerStream(program: Command): void {
   program
     .command("stream")
     .description("Stream incoming messages via SSE")
-    .option("--agent <id>", "Agent ID to stream (defaults to your agent)")
+    .addOption(actorOption(
+      "which agent is acting, and whose messages stream (name, handle, or agent ID)",
+    ))
     .option("--verbose", "Show heartbeats and reconnect details")
     .option("--persistent", "Disable server-side connection timeout")
     .option(
@@ -184,7 +234,7 @@ export function registerStream(program: Command): void {
       "70",
     )
     .option("--monitor", "Suppress non-message stdout (for CC plugin monitors)")
-    .action(async (opts: StreamOpts) => {
+    .action(async (opts: StreamOpts, command: Command) => {
       try {
         const gOpts = program.opts<GlobalOpts>();
         const configDir = resolveConfigDir();
@@ -195,13 +245,8 @@ export function registerStream(program: Command): void {
           gOpts.profile,
         );
 
-        const agents = await fetchAgents(client);
-        const agentId = await resolveAgent(
-          apiUrl,
-          agents,
-          opts.agent,
-          gOpts.as,
-        );
+        const { actingAgent } = actorLadder(namedActor(command, gOpts), client);
+        const agentId = await actingAgent();
 
         let url = `${apiUrl}/agents/${agentId}/stream`;
         if (opts.persistent) {
@@ -223,6 +268,17 @@ export function registerStream(program: Command): void {
         // Drawn once for this long-lived stream so co-located agents
         // desynchronize their token refreshes across reconnects.
         const refreshMargin = jitteredRefreshMargin();
+
+        // One `rine stream` invocation is one render, so the "have I explained
+        // the missing sender key yet" state lives here, in this invocation's
+        // own closure, and is dropped with it.
+        //
+        // Deliberately OUTSIDE the reconnect loop below: a heartbeat timeout is
+        // an event in the network, not in the reading — re-explaining after
+        // every reconnect would make how often an agent is told depend on how
+        // flaky its link is. Equally deliberately NOT at module scope, where
+        // the state would outlive the stream and no test could pin it.
+        const explain = senderKeyExplainer();
 
         process.on("SIGINT", () => {
           stopped = true;
@@ -295,8 +351,17 @@ export function registerStream(program: Command): void {
                       console.log(JSON.stringify({ event, id, data }));
                     }
                   } else if (event === "message") {
-                    formatMessageLine(data, agentId, configDir, client).then(
-                      (line) => console.log(line),
+                    formatMessageLine(
+                      data,
+                      agentId,
+                      configDir,
+                      client,
+                      explain,
+                    ).then(
+                      ({ line, notice }) => {
+                        if (notice !== null) printError(notice);
+                        console.log(line);
+                      },
                       () => console.log(`[message] ${data.slice(0, 80)}`),
                     );
                   } else if (event === "heartbeat" && opts.verbose) {

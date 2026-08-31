@@ -1,11 +1,10 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import {
 	type ListResponse,
 	type WebhookDeliveryRead,
 	type WebhookRead,
-	fetchAgents,
-	resolveAgent,
 } from "@rine-network/core";
 import {
 	printError,
@@ -21,19 +20,18 @@ export function registerWebhook(program: Command): void {
 	webhook
 		.command("create")
 		.description("Create a new webhook")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.requiredOption("--url <url>", "Webhook target URL (must be https://)")
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, apiUrl }, opts: { agent?: string; url: string }) => {
+				async ({ client, gOpts,  actingAgent }, opts: { agent?: string; url: string }) => {
 					if (!opts.url.startsWith("https://")) {
 						printError("Webhook URL must start with https://");
 						process.exitCode = 2;
 						return;
 					}
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+					const agentId = await actingAgent();
 					const data = (await client.post("/webhooks", {
 						agent_id: agentId,
 						url: opts.url,

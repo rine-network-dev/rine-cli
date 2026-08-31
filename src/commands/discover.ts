@@ -1,12 +1,8 @@
 import type { Command } from "commander";
 import { withErrorHandler } from "../action.js";
-import {
-	HttpClient,
-	UUID_RE,
-	resolveApiUrl,
-	resolveHandleViaWebFinger,
-} from "@rine-network/core";
-import { printError, printJson, printTable, printText } from "../output.js";
+import { HttpClient, resolveApiUrl, resolveToUuid } from "@rine-network/core";
+import { announceHandleCompletion } from "../handle-completion.js";
+import { printJson, printTable, printText } from "../output.js";
 import { registerDiscoverGroups } from "./discover-groups.js";
 
 function trunc(s: unknown, len: number): string {
@@ -172,18 +168,32 @@ export function registerDiscover(program: Command): void {
 		.action(
 			withErrorHandler(program, async (gOpts, agentIdArg: string) => {
 				const apiUrl = resolveApiUrl();
-				let resolvedId = agentIdArg;
-				if (agentIdArg.includes("@")) {
-					resolvedId = await resolveHandleViaWebFinger(apiUrl, agentIdArg);
-				}
-				if (!UUID_RE.test(resolvedId)) {
-					printError(
-						`Could not resolve '${agentIdArg}' to an agent UUID. ` +
-							"Provide a UUID or a valid handle (e.g. agent@org).",
-					);
-					process.exitCode = 1;
-					return;
-				}
+				// 🔴 The refusal this used to compose here printed
+				// `kofi@acme.rine.network`, a placeholder domain in a REFUSAL —
+				// which a model was measured copying verbatim, local part
+				// moved, domain not. `resolveToUuid` is the shared recipient /
+				// invitee / target resolver and already answers this exact question
+				// with a placeholder-free sentence (`invalidAgentIdentifierRefusal`
+				// names the three PARTS of a handle instead of printing one), gated
+				// against its Python twin. Rung 1 — naming a real handle — is
+				// unreachable here: the directory lookup is the thing that failed,
+				// so there is nothing resolved to echo alongside the caller's own
+				// spelling, which the sentence does carry.
+				//
+				// Same two arms as the block it replaces, plus `normalizeHandle`, so
+				// `kofi@acme` now reaches WebFinger as `kofi@acme.rine.network`
+				// instead of being refused. Throws rather than printing:
+				// `withErrorHandler` prints and sets the same exit code 1.
+				//
+				// 🔴 Item 18: that completion is announced, never silent. A caller
+				// who typed `kofi@acme` is looked up as something they did not
+				// write, and being told which agent was actually inspected is the
+				// difference between a helpful default and a wrong answer nobody
+				// can see. The notice is `announceHandleCompletion`'s and is not
+				// restated here — every `resolveToUuid` call site carries the same
+				// one, so there is one sentence and one gate over all of them.
+				announceHandleCompletion(agentIdArg);
+				const resolvedId = await resolveToUuid(apiUrl, agentIdArg);
 				const data = await HttpClient.publicGet(
 					apiUrl,
 					`/directory/agents/${resolvedId}`,

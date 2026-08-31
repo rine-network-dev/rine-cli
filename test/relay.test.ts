@@ -74,7 +74,7 @@ const mockStartTlsListener = vi.fn(async () => {
 });
 const mockAgentKeysExist = vi.fn(() => true);
 // The persisted HMAC secret the relay resolves at startup. Default: a real secret
-// so the orchestration tests run; the empty-secret fail-closed test (T1) overrides
+// so the orchestration tests run; the empty-secret fail-closed test overrides
 // it to "" to exercise the refuse-to-start guard.
 const mockLoadHookSecret = vi.fn<() => string | undefined>(() => "hook-secret");
 
@@ -85,7 +85,7 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		resolveConfigDir: vi.fn(() => "/fake/config"),
 		resolveApiUrl: vi.fn(() => "http://localhost:7001"),
 		fetchAgents: vi.fn(async () => [{ id: AGENT_ID, name: "bot" }]),
-		resolveAgent: vi.fn(async () => AGENT_ID),
+		resolveAgent: vi.fn(async () => ({ agentId: AGENT_ID })),
 		getOrRefreshToken: vi.fn(async () => "fake-token"),
 		formatError: vi.fn((e: unknown) => String(e)),
 		loadHookSecret: (...a: unknown[]) => mockLoadHookSecret(...(a as [])),
@@ -99,7 +99,7 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		loadMeta: vi.fn(() => ({ not_after: "2099-01-01T00:00:00Z" })),
 		renewalDueWithJitter: vi.fn(() => false),
 		// `agentLabel` is the SOLE deriver of the per-agent cert-cache key — keep the
-		// REAL implementation so the C1 regression asserts the real label extraction
+		// REAL implementation so the regression asserts the real label extraction
 		// from the server hostname (the second-to-last label before `.hook.…`).
 		agentLabel: orig.agentLabel,
 		// The mux tunnel + local TLS listener are re-exported from the rine-core
@@ -256,7 +256,7 @@ describe("rine relay — fatal startup gates (edge cases)", () => {
 		expect(mockConnectTunnel).not.toHaveBeenCalled();
 	});
 
-	it("refuses to start (exit 2, no listener/tunnel) when no HMAC secret resolves (T1 fail-closed)", async () => {
+	it("refuses to start (exit 2, no listener/tunnel) when no HMAC secret resolves (fail-closed)", async () => {
 		// No --secret-env / --secret-file and nothing persisted ⇒ empty secret.
 		mockLoadHookSecret.mockReturnValue(undefined);
 		const program = makeProgram({});
@@ -300,7 +300,7 @@ describe("rine relay — startup orchestration order", () => {
 		expect(call?.options).toMatchObject({ staging: true });
 	});
 
-	it("issues the cert for the SERVER hostname's AGENT LABEL, not the agent UUID (C1 regression)", async () => {
+	it("issues the cert for the SERVER hostname's AGENT LABEL, not the agent UUID", async () => {
 		const program = makeProgram({});
 		await program.parseAsync(["node", "rine", "relay", "--agent", AGENT_ID]);
 		// The cert handle must be the AGENT label — the second-to-last DNS label of

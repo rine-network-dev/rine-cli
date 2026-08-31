@@ -4,15 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerMessages } from "../src/commands/messages.js";
 import * as outputModule from "../src/output.js";
 
-// A10 / regression for C3: `rine read` must recognise hpke-hybrid-v1 messages
-// as decryptable. The hybrid PQ work added a new encryption_version, but the
-// read command's canDecrypt gate originally only matched hpke-v1 and
-// sender-key-v1, so hybrid messages silently fell through to the raw
-// "Encrypted Payload" fallback and were never decrypted.
+// `rine read` must recognise hpke-hybrid-v1 messages as decryptable. The
+// hybrid PQ work added a new encryption_version, but the read command's
+// canDecrypt gate originally only matched hpke-v1 and sender-key-v1, so hybrid
+// messages silently fell through to the raw "Encrypted Payload" fallback and
+// were never decrypted.
 //
 // These tests drive the REAL `read` command with a message whose
 // encryption_version === "hpke-hybrid-v1". canDecrypt is the gate that
-// decides whether core.decryptMessage is invoked at all. Reverting C3
+// decides whether core.decryptMessage is invoked at all. Reverting the fix
 // (dropping "hpke-hybrid-v1" from the canDecrypt union) makes canDecrypt
 // false, so decryptMessage is never called and the decrypted payload is
 // never shown — failing every assertion below.
@@ -75,7 +75,7 @@ beforeEach(() => {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, handle: "bot@org.rine.network" } as never,
 	]);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(AGENT_ID);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: AGENT_ID });
 	// Recipient holds local keys, so canDecrypt depends purely on the version.
 	vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
 	vi.spyOn(core, "ingestSenderKeyDistribution").mockReturnValue(false);
@@ -96,7 +96,10 @@ function makeProgram(globalOpts: Record<string, unknown> = {}): Command {
 }
 
 describe("thread command — role-tagged transcript", () => {
-	const CONV_ID = "conv-7";
+	// A UUID because the server types this path parameter `uuid.UUID` and always
+	// has: `conv-7` was a fixture no live conversation could have matched, and
+	// the command now says so before it spends the request.
+	const CONV_ID = "77777777-7777-7777-7777-777777777777";
 	const THREAD_ENTRIES = [
 		{
 			direction: "sent" as const,
@@ -117,9 +120,13 @@ describe("thread command — role-tagged transcript", () => {
 	];
 
 	beforeEach(() => {
-		// The conversations endpoint returns the both-sided page; decryptThreadRow
+		// The conversations endpoint returns the both-sided page; decryptThreadRows
 		// is unit-covered in rine-core, so stub it to the rendered entries here and
 		// assert on the CLI-layer rendering (decrypted tool OUTPUT).
+		//
+		// The PLURAL call is what the command makes, and deliberately so: the whole
+		// render is one call, which is what lets rine-core say why an unopenable
+		// group message stayed shut once per transcript instead of once per row.
 		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
 			(path: string) => {
 				if (path === `/conversations/${CONV_ID}/messages`) {
@@ -128,11 +135,7 @@ describe("thread command — role-tagged transcript", () => {
 				return Promise.reject(new Error(`Unknown path: ${path}`));
 			},
 		);
-		let i = 0;
-		vi.spyOn(core, "decryptThreadRow").mockImplementation(async () => {
-			// biome-ignore lint/style/noNonNullAssertion: fixed 2-row fixture
-			return THREAD_ENTRIES[i++]!;
-		});
+		vi.spyOn(core, "decryptThreadRows").mockResolvedValue(THREAD_ENTRIES);
 	});
 
 	it("prints both [sent] and [received] rows in order", async () => {
@@ -171,7 +174,91 @@ describe("thread command — role-tagged transcript", () => {
 	});
 });
 
-describe("read command — hpke-hybrid-v1 is decryptable (A10 / C3)", () => {
+describe("thread command — reading a group", () => {
+	const GROUP_ID = "88888888-8888-8888-8888-888888888888";
+	const CONV_ID = "77777777-7777-7777-7777-777777777777";
+
+	function stubPaths(): string[] {
+		const seen: string[] = [];
+		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
+			(path: string) => {
+				seen.push(path);
+				if (path === "/groups") {
+					return Promise.resolve({
+						items: [{ id: GROUP_ID, handle: "#ops@acme.rine.network" }],
+					});
+				}
+				return Promise.resolve({ messages: [], truncated: false });
+			},
+		);
+		vi.spyOn(core, "decryptThreadRows").mockResolvedValue([]);
+		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
+		return seen;
+	}
+
+	it("reads the group's own route when --group names a handle", async () => {
+		const seen = stubPaths();
+		const program = makeProgram({ json: false });
+		await program.parseAsync([
+			"node",
+			"rine",
+			"thread",
+			"--group",
+			"#ops@acme",
+		]);
+		expect(seen).toEqual(["/groups", `/groups/${GROUP_ID}/messages`]);
+	});
+
+	it("refuses both references before it spends a request", async () => {
+		const seen = stubPaths();
+		// `fetchAgents` is the acting-agent lookup this command used to spend
+		// BEFORE deciding the reference — a refusal advertised as free that cost a
+		// round trip. It is stubbed here rather than driven, so the assertion below
+		// is that it was never asked.
+		const agents = vi.mocked(core.fetchAgents);
+		agents.mockClear();
+		const errors = vi
+			.spyOn(outputModule, "printError")
+			.mockImplementation(() => {});
+		const program = makeProgram({ json: false });
+		await program.parseAsync([
+			"node",
+			"rine",
+			"thread",
+			CONV_ID,
+			"--group",
+			"#ops@acme",
+		]);
+		expect(seen).toEqual([]);
+		expect(agents).not.toHaveBeenCalled();
+		expect(errors.mock.calls.at(-1)?.[0]).toContain(
+			"Name exactly one of --group (a group handle, name or UUID) or " +
+				"<conversation-id> (a conversation UUID).",
+		);
+	});
+
+	it("tells a caller who named a group to the conversation argument where it goes", async () => {
+		const seen = stubPaths();
+		const errors = vi
+			.spyOn(outputModule, "printError")
+			.mockImplementation(() => {});
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "thread", "#ops@acme"]);
+		expect(seen).toEqual([]);
+		// 🔴 The placeholder ban, second rung. This printed
+		// `--group=#logistics@acme.rine.network` until the worked example was
+		// retired: a model was measured inventing the local part
+		// and pasting the printed domain back verbatim. The refusal still names
+		// the argument that takes a group, and lists the three spellings it
+		// accepts, with no handle of its own to copy.
+		expect(errors.mock.calls.at(-1)?.[0]).toContain(
+			"To read a group, name the group instead — --group takes a group's " +
+				"whole handle, a bare group name, or its UUID.",
+		);
+	});
+});
+
+describe("read command — hpke-hybrid-v1 is decryptable", () => {
 	it("invokes decryptMessage for a hybrid message", async () => {
 		const decryptSpy = vi
 			.spyOn(core, "decryptMessage")
@@ -183,13 +270,15 @@ describe("read command — hpke-hybrid-v1 is decryptable (A10 / C3)", () => {
 		const program = makeProgram({ json: false });
 		await program.parseAsync(["node", "rine", "read", MESSAGE_ID]);
 
-		// Reverting C3 makes canDecrypt false → this is never called.
+		// Reverting the fix makes canDecrypt false → this is never called.
 		expect(decryptSpy).toHaveBeenCalledTimes(1);
 		expect(decryptSpy).toHaveBeenCalledWith(
 			"/tmp/test-rine",
 			AGENT_ID,
 			HYBRID_MESSAGE.encrypted_payload,
 			expect.any(core.HttpClient),
+			// The envelope is checked against the row's server-authenticated sender.
+			HYBRID_MESSAGE.from_agent_id,
 		);
 
 		// Observable outcome: the rendered row must be the decrypted view, not
@@ -245,6 +334,55 @@ describe("read command — hpke-hybrid-v1 is decryptable (A10 / C3)", () => {
 		);
 	});
 
+	it("leaves a message with no server-authenticated sender encrypted", async () => {
+		// Nothing to check the envelope's claim of authorship against, so the row
+		// is shown as it arrived rather than opened on trust.
+		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
+			(path: string) => {
+				if (path === `/messages/${MESSAGE_ID}`) {
+					return Promise.resolve({
+						...HYBRID_MESSAGE,
+						from_agent_id: undefined,
+					});
+				}
+				return Promise.resolve({ items: [{ id: AGENT_ID, name: "bot" }] });
+			},
+		);
+		const decryptSpy = vi
+			.spyOn(core, "decryptMessage")
+			.mockResolvedValue(DECRYPT_RESULT);
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "read", MESSAGE_ID]);
+
+		expect(decryptSpy).not.toHaveBeenCalled();
+		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		expect(arg).not.toHaveProperty("decrypted_payload");
+	});
+
+	it("marks a message signed by someone other than its sender, not a bare ✓", async () => {
+		vi.spyOn(core, "decryptMessage").mockResolvedValue({
+			...DECRYPT_RESULT,
+			verified: false,
+			verificationStatus: "sender-mismatch",
+		});
+		const printTableSpy = vi
+			.spyOn(outputModule, "printTable")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "read", MESSAGE_ID]);
+
+		const row = printTableSpy.mock.calls.at(-1)?.[0]?.[0] as Record<
+			string,
+			unknown
+		>;
+		expect(row.Verified).toBe("✗ SENDER MISMATCH");
+	});
+
 	it("falls back to raw encrypted output when hybrid decryption fails", async () => {
 		// Distinct branch from the success cases above: canDecrypt is still true
 		// for a hybrid message (so the gate is exercised), but decryptMessage
@@ -266,9 +404,145 @@ describe("read command — hpke-hybrid-v1 is decryptable (A10 / C3)", () => {
 		// ...but decryption threw, so the raw fallback is emitted instead.
 		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
 		expect(arg).not.toHaveProperty("decrypted_payload");
-		expect(arg).toHaveProperty(
-			"encryption_version",
-			"hpke-hybrid-v1",
+		expect(arg).toHaveProperty("encryption_version", "hpke-hybrid-v1");
+	});
+});
+describe("read command — a group message whose sender key never arrived", () => {
+	const GROUP_MESSAGE_ID = "msg-group-1";
+	const GROUP_ID = "88888888-8888-8888-8888-888888888888";
+	const MISSING_KEY_ID = "44444444-4444-4444-4444-444444444444";
+
+	beforeEach(() => {
+		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
+			(path: string) => {
+				if (path === `/messages/${GROUP_MESSAGE_ID}`) {
+					return Promise.resolve({
+						...HYBRID_MESSAGE,
+						id: GROUP_MESSAGE_ID,
+						group_id: GROUP_ID,
+						encryption_version: "sender-key-v1",
+					} as unknown as core.MessageRead);
+				}
+				return Promise.reject(new Error(`Unknown path: ${path}`));
+			},
 		);
+		// The seam is the RECOVERY, not the bare decrypt: `read` reaches this
+		// failure through core's one-shot ingest-and-retry, and what comes back is
+		// the verdict that recovery reached — the scan ran and found nothing, which
+		// is what makes the refusal below an answer rather than a stage.
+		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockRejectedValue(
+			new core.SenderKeyUnavailableError(MISSING_KEY_ID, GROUP_ID),
+		);
+	});
+
+	it("test_group_read_when_no_key_arrives_then_it_explains_instead_of_echoing_the_control_string", async () => {
+		const printErrorSpy = vi
+			.spyOn(outputModule, "printError")
+			.mockImplementation(() => {});
+		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "read", GROUP_MESSAGE_ID]);
+
+		const said = printErrorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+		expect(said).toContain(MISSING_KEY_ID);
+		expect(said).toContain("Ask the sender to post to the group again");
+		expect(said).toContain("This message stays sealed");
+		// "unknown sender key id: <uuid>" is what core throws so the
+		// recovery knows what to fetch — never what an operator is shown.
+		expect(said).not.toContain("unknown sender key id");
+	});
+
+	it("test_group_read_when_json_is_asked_for_then_the_refusal_stays_off_stderr", async () => {
+		const printErrorSpy = vi
+			.spyOn(outputModule, "printError")
+			.mockImplementation(() => {});
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "read", GROUP_MESSAGE_ID]);
+
+		expect(printErrorSpy).not.toHaveBeenCalled();
+		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		expect(arg).not.toHaveProperty("decrypted_payload");
+	});
+});
+
+describe("read command — what the read did to a closed group's MLS state", () => {
+	const MLS_MESSAGE_ID = "msg-mls-1";
+	const GROUP_ID = "99999999-9999-9999-9999-999999999999";
+
+	function serveMlsRow(): void {
+		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
+			(path: string) => {
+				if (path === `/messages/${MLS_MESSAGE_ID}`) {
+					return Promise.resolve({
+						...HYBRID_MESSAGE,
+						id: MLS_MESSAGE_ID,
+						group_id: GROUP_ID,
+						encryption_version: "mls-v1",
+					} as unknown as core.MessageRead);
+				}
+				return Promise.reject(new Error(`Unknown path: ${path}`));
+			},
+		);
+	}
+
+	it("test_mls_read_when_the_catch_up_applied_commits_then_json_reports_them", async () => {
+		// The commits were applied on the way to this plaintext and then thrown
+		// away, so a client twenty-five epochs behind read exactly like a current
+		// one. It reports the work it did, never the distance it had left.
+		serveMlsRow();
+		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockResolvedValue({
+			...DECRYPT_RESULT,
+			catchUp: { processed: 3, epoch: 9, evicted: false },
+		});
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "read", MLS_MESSAGE_ID]);
+
+		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		expect(arg.catch_up).toEqual({ processed: 3, epoch: 9, evicted: false });
+	});
+
+	it("test_mls_read_when_no_catch_up_ran_then_json_claims_nothing", async () => {
+		// Absent, not zeroed: "this read applied nothing" is a different claim
+		// from "you are current", and only the first one is true here.
+		serveMlsRow();
+		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockResolvedValue(DECRYPT_RESULT);
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "read", MLS_MESSAGE_ID]);
+
+		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		expect(arg).not.toHaveProperty("catch_up");
+	});
+
+	it("test_mls_read_when_the_catch_up_evicted_this_agent_then_the_reader_is_told", async () => {
+		// The row still opens — it is the NEXT send that is refused — so without
+		// this line the eviction is learned from an unrelated failure later.
+		serveMlsRow();
+		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockResolvedValue({
+			...DECRYPT_RESULT,
+			catchUp: { processed: 1, epoch: 10, evicted: true },
+		});
+		const printErrorSpy = vi
+			.spyOn(outputModule, "printError")
+			.mockImplementation(() => {});
+		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "read", MLS_MESSAGE_ID]);
+
+		const said = printErrorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+		expect(said).toContain(core.MLS_EVICTED_BY_COMMIT);
 	});
 });

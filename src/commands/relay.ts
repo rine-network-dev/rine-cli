@@ -26,7 +26,6 @@ import {
 	buildIssueCertDeps,
 	connectTunnel,
 	ensureCert,
-	fetchAgents,
 	getOrRefreshToken,
 	handleWebhookRequest,
 	jitteredRefreshMargin,
@@ -34,13 +33,14 @@ import {
 	loadMeta,
 	makeEdgePipeFactory,
 	renewalDueWithJitter,
-	resolveAgent,
 	resolveApiUrl,
 	resolveConfigDir,
 	startTlsListener,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { createClient } from "../action.js";
+import { actorLadder } from "../acting-agent.js";
+import { actorOption, namedActor } from "../actor.js";
 import { printError } from "../output.js";
 import type { GlobalOpts } from "../types.js";
 
@@ -78,7 +78,7 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Parse --port into a valid TCP port. `0` is accepted as "OS-assign an ephemeral
- * port" (it is NOT coerced to the default — that was the L3 footgun); a
+ * port" (it is NOT coerced to the default — that coercion was the footgun); a
  * non-integer or out-of-range value throws a clear error rather than silently
  * falling back. The default flag value "8443" parses straight through.
  */
@@ -102,7 +102,7 @@ function isRevoked(err: unknown): boolean {
  * Resolve the HMAC secret: --secret-env > --secret-file > the persisted file.
  * Returns "" (after a stderr warning naming the three sources tried) when none is
  * found. An empty secret is NOT safe to run with: an attacker who controls the
- * body can compute `HMAC("", body)` and forge a "verified" self-send (T1), so the
+ * body can compute `HMAC("", body)` and forge a "verified" self-send, so the
  * caller (runRelayLoop) HARD-REFUSES to start on an empty result — the relay never
  * enters the reconnect loop or opens the listener without a secret.
  */
@@ -130,14 +130,14 @@ export function registerRelay(program: Command): void {
 		.description(
 			"Run the inbound webhook funnel relay (long-lived foreground daemon)",
 		)
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.option("--hook <name>", "Hook name to relay", "default")
 		.option("--port <n>", "Local TLS listener port", "8443")
 		.option("--secret-file <path>", "Read the HMAC secret from a file")
 		.option("--secret-env <VAR>", "Read the HMAC secret from an env var")
 		.option("--staging", "Use the Let's Encrypt staging CA (dev)")
 		.option("--verbose", "Verbose reconnect logging")
-		.action(async (opts: RelayOpts) => {
+		.action(async (opts: RelayOpts, command: Command) => {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
 				const configDir = resolveConfigDir();
@@ -148,13 +148,8 @@ export function registerRelay(program: Command): void {
 					gOpts.profile,
 				);
 
-				const agents = await fetchAgents(client);
-				const agentId = await resolveAgent(
-					apiUrl,
-					agents,
-					opts.agent,
-					gOpts.as,
-				);
+				const { actingAgent } = actorLadder(namedActor(command, gOpts), client);
+				const agentId = await actingAgent();
 
 				if (!agentKeysExist(configDir, agentId)) {
 					printError(
@@ -207,7 +202,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 	const port = parsePort(opts.port);
 	const secret = resolveSecret(opts, configDir, agentId);
 	if (secret.length === 0) {
-		// Fail closed (T1): a relay running with an empty HMAC secret is forgeable
+		// Fail closed: a relay running with an empty HMAC secret is forgeable
 		// — an attacker who controls the body computes HMAC("", body) and self-sends
 		// a "verified" rine.v1.webhook. Refuse to start; never open the listener.
 		printError(
@@ -236,7 +231,7 @@ async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 	// duplicate-cert budget). Whoever holds it wins; the other defers.
 	let certBusy = false;
 	let renewalTimer: ReturnType<typeof setInterval> | undefined;
-	// (T8) One replay-de-dup store for the whole relay process — persists across
+	// One replay-de-dup store for the whole relay process — persists across
 	// reconnects so a tunnel flap can't re-admit a captured signed delivery.
 	// Bounded + TTL-evicting; HMAC verify stays the authenticator, this only
 	// drops a post-verify duplicate so it can't mint a second rine.v1.webhook.

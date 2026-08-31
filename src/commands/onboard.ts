@@ -3,6 +3,7 @@ import { createClient, withErrorHandler } from "../action.js";
 import {
 	type AgentRead,
 	type ListResponse,
+	compareVerificationWordsForAgent,
 	getCredentialEntry,
 	hasSpiffeEndpoint,
 	performAgentCreation,
@@ -10,6 +11,7 @@ import {
 	resolveApiUrl,
 	resolveConfigDir,
 	validateSlug,
+	verificationWordsLines,
 } from "@rine-network/core";
 import { toAgentRow } from "../agent-format.js";
 import { printError, printJson, printTable } from "../output.js";
@@ -21,7 +23,7 @@ export function registerOnboard(program: Command): void {
 		.requiredOption("--email <email>", "Email address")
 		.requiredOption("--name <name>", "Organization name")
 		.requiredOption("--slug <slug>", "Organization slug")
-		.requiredOption("--agent <agent-name>", "Name for the first agent")
+		.requiredOption("--agent-name <name>", "Name for the first agent")
 		.option(
 			"--[no-]human-oversight",
 			"Require human oversight (default: true)",
@@ -44,7 +46,7 @@ export function registerOnboard(program: Command): void {
 						email: string;
 						name: string;
 						slug: string;
-						agent: string;
+						agentName: string;
 						humanOversight?: boolean;
 						unlisted?: boolean;
 						verifyIdentity?: boolean;
@@ -55,7 +57,7 @@ export function registerOnboard(program: Command): void {
 					const configDir = resolveConfigDir();
 					const apiUrl = resolveApiUrl();
 
-					// REQ-1.2: Slug validation before PoW
+					// Slug validation before PoW
 					if (!validateSlug(opts.slug)) {
 						printError(
 							"Invalid slug: must be 2-32 lowercase alphanumeric characters or hyphens, " +
@@ -65,7 +67,7 @@ export function registerOnboard(program: Command): void {
 						return;
 					}
 
-					// REQ-1.3: Idempotency guard
+					// Idempotency guard
 					const existing = getCredentialEntry(configDir, profile);
 					if (existing) {
 						const { client } = await createClient(
@@ -97,7 +99,7 @@ export function registerOnboard(program: Command): void {
 						return;
 					}
 
-					// REQ-1.4: Registration flow
+					// Registration flow
 					process.stderr.write(
 						"By registering, you accept the rine terms of service and privacy policy:\n" +
 							"  https://rine.network/terms.html\n" +
@@ -120,14 +122,14 @@ export function registerOnboard(program: Command): void {
 					);
 					progressStream.write("\rSolving PoW challenge: 100%\n");
 
-					// REQ-1.5: Agent creation
+					// Agent creation
 					const { client } = await createClient(
 						configDir,
 						apiUrl,
 						gOpts.profile,
 					);
 					const agent = await performAgentCreation(client, configDir, profile, {
-						name: opts.agent,
+						name: opts.agentName,
 						humanOversight: opts.humanOversight,
 						unlisted: opts.unlisted,
 						verifyIdentity:
@@ -137,7 +139,15 @@ export function registerOnboard(program: Command): void {
 						svid: opts.svid,
 					});
 
-					// REQ-1.6: Output. The agent is created even if a requested SPIFFE
+					// Recomputed from the key just written to this config dir, never
+					// from the string the server sent back with the agent.
+					const verification = compareVerificationWordsForAgent(
+						configDir,
+						agent.id,
+						agent.verification_words,
+					);
+
+					// Output. The agent is created even if a requested SPIFFE
 					// verification failed — print the creation result first, then surface
 					// any verification error as a warning (creation success is never hidden
 					// behind a verify failure).
@@ -146,6 +156,7 @@ export function registerOnboard(program: Command): void {
 							org_id: regResult.org_id,
 							client_id: regResult.client_id,
 							agent,
+							verification,
 							poll_url: agent.poll_url,
 							identity: agent.identity,
 							identity_error: agent.identityError,
@@ -153,18 +164,13 @@ export function registerOnboard(program: Command): void {
 						});
 					} else {
 						printTable([
-							toAgentRow(agent, {
-								includeCard: true,
-								includeVerificationWords: true,
-							}),
+							toAgentRow(agent, { includeCard: true, verification }),
 						]);
 						console.log(
 							`\nAgent '${agent.name}' created — reachable at ${agent.handle}`,
 						);
-						if (agent.verification_words) {
-							console.log(
-								`Verification words: ${agent.verification_words}`,
-							);
+						for (const line of verificationWordsLines(verification)) {
+							console.log(line);
 						}
 						if (agent.poll_url) {
 							console.log(`Poll URL: ${agent.poll_url}`);

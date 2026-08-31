@@ -15,6 +15,8 @@ import { registerPay } from "../src/commands/pay.js";
 const API_URL = "https://test.rine.network";
 const PAYER = "11111111-1111-1111-1111-111111111111";
 const PAYEE = "22222222-2222-2222-2222-222222222222";
+/** A third agent that re-seals the payee's quote and posts it as its own. */
+const RESEALER = "33333333-3333-3333-3333-333333333333";
 const MESSAGE_ID = "quote-msg-1";
 const EURC = "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42";
 
@@ -79,7 +81,7 @@ beforeEach(() => {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: PAYER, name: "payer" },
 	] as never);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(PAYER);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: PAYER });
 	vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
 
 	// The quote GET + the reply POST.
@@ -140,6 +142,25 @@ function run(...argv: string[]): Promise<Command> {
 	return makeProgram({ json: true }).parseAsync(["node", "rine", ...argv]);
 }
 
+/** Everything the command wrote to stderr, joined. */
+function errorOutput(): string {
+	return (console.error as ReturnType<typeof vi.fn>).mock.calls
+		.map((c) => String(c[0]))
+		.join("\n");
+}
+
+/** The decrypt verdict for a quote the payee did NOT sign. */
+function resealedQuote(status: string): void {
+	(core.decryptMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+		// The terms are payable and the body parses — the ONLY thing wrong is who
+		// signed the envelope, so nothing but the verdict can stop the payment.
+		plaintext: JSON.stringify(QUOTE),
+		senderKid: `rine:${RESEALER}`,
+		verified: false,
+		verificationStatus: status,
+	} as never);
+}
+
 describe("rine pay — happy path (policy + real signing)", () => {
 	beforeEach(() => {
 		core.createWallet(CONFIG_DIR, PAYER);
@@ -151,6 +172,14 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		expect(postPath).toBe(`/messages/${MESSAGE_ID}/reply`);
 		expect(postBody?.type).toBe("rine.v1.x402_payment");
 		expect(postBody?.encrypted_payload).toBe("ciphertext-payment");
+	});
+
+	it("checks the quote envelope against the payee the server says issued it", async () => {
+		await run("pay", MESSAGE_ID);
+		const args = (core.decryptMessage as ReturnType<typeof vi.fn>).mock
+			.calls[0] as unknown[];
+		// Never the kid or the `sender_signing_kid` header the sender supplied.
+		expect(args[4]).toBe(PAYEE);
 	});
 
 	it("attaches the payment-submitted status marker (no economic detail)", async () => {
@@ -195,7 +224,7 @@ describe("rine pay — happy path (policy + real signing)", () => {
 	});
 
 	it("fail-closed: reservation STANDS when the reply POST fails (no refund)", async () => {
-		// O2′: the EIP-3009 authorization is settleable the instant it is built, so
+		// The EIP-3009 authorization is settleable the instant it is built, so
 		// the debit is reserved before transmit and is permanent — a failed send
 		// does NOT refund it (would let a counterparty fake failures past the cap).
 		(
@@ -224,6 +253,69 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		process.exitCode = undefined;
 		await run("pay", MESSAGE_ID, "--force");
 		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(200000n);
+	});
+});
+
+describe("rine pay — sender binding on the money path", () => {
+	beforeEach(() => {
+		core.createWallet(CONFIG_DIR, PAYER);
+		core.savePolicy(CONFIG_DIR, PAYER, STANDARD_POLICY);
+	});
+
+	it("refuses a quote the payee did not sign (exit 1, nothing signed or spent)", async () => {
+		// A quote re-sealed by a third party and posted under its own name is not
+		// the payee's word: the wallet never signs an authorization against it.
+		resealedQuote("sender-mismatch");
+
+		await run("pay", MESSAGE_ID);
+
+		expect(process.exitCode).toBe(1);
+		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		expect(core.encryptMessage).not.toHaveBeenCalled();
+		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
+		// The operator is told which agent actually signed it.
+		expect(errorOutput()).toContain(RESEALER);
+	});
+
+	it("refuses a quote addressed to a sibling, naming the addressee (exit 1)", async () => {
+		// The quote is sealed to RESEALER; this invocation acts as PAYER. Only
+		// the addressee holds the key, so the decrypt was always going to fail —
+		// but as an opaque crypto error that reads as a broken message rather
+		// than the wrong agent. Refuse first, and say which agent it was for.
+		(
+			core.HttpClient.prototype.get as ReturnType<typeof vi.fn>
+		).mockResolvedValue(quoteMessage({ to_agent_id: RESEALER }));
+
+		await run("pay", MESSAGE_ID);
+
+		expect(process.exitCode).toBe(1);
+		expect(errorOutput()).toContain(RESEALER);
+		// Nothing local was opened, signed or spent.
+		expect(core.decryptMessage).not.toHaveBeenCalled();
+		expect(core.encryptMessage).not.toHaveBeenCalled();
+		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
+	});
+
+	it("refuses a quote whose signature does not check out (exit 1)", async () => {
+		// The other authenticity failure is refused identically.
+		resealedQuote("invalid");
+
+		await run("pay", MESSAGE_ID);
+
+		expect(process.exitCode).toBe(1);
+		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
+	});
+
+	it("pays a quote whose envelope the payee signed (false-positive guard)", async () => {
+		// The identical quote, correctly attributed, still pays — without this the
+		// refusals above would pass against a gate that refuses everything.
+		await run("pay", MESSAGE_ID);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(postBody?.type).toBe("rine.v1.x402_payment");
+		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(100000n);
 	});
 });
 

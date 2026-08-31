@@ -26,14 +26,14 @@ import {
 	type ResolvedPayeeRequirement,
 	X402Error,
 	X402FacilitatorError,
+	X402_ERROR,
 	X402_MESSAGE_TYPE,
 	agentKeysExist,
 	decryptMessage,
-	fetchAgents,
 	parseFacilitatorHeaders,
 	parseX402Payload,
 	refusalReceiptBody,
-	resolveAgent,
+	requireAuthenticPlaintext,
 	resolveFacilitatorConfig,
 	resolvePayeeRequirement,
 	sendReceipt,
@@ -41,6 +41,7 @@ import {
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { printError, printJson } from "../output.js";
 import { reportFulfill } from "../x402-receipt.js";
 
@@ -63,7 +64,9 @@ export function registerFulfill(program: Command): void {
 				"out-of-band quote.",
 		)
 		.argument("<message-id>", "ID of the received rine.v1.x402_payment")
-		.option("--agent <id>", "Payee agent ID (defaults to your agent)")
+		.addOption(actorOption(
+			"which agent is acting, as payee (name, handle, or agent ID)",
+		))
 		.option(
 			"--facilitator <preset|url>",
 			"Facilitator preset (cdp | payai | x402-rs) or an http(s):// base URL",
@@ -98,7 +101,7 @@ export function registerFulfill(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir, apiUrl },
+					{ client, gOpts, configDir, actingAgent },
 					messageId: string,
 					opts: {
 						agent?: string;
@@ -113,6 +116,9 @@ export function registerFulfill(program: Command): void {
 						marker?: boolean;
 					},
 				) => {
+					// Resolved BEFORE the fetch (see `ActorLadder.actingAgent`).
+					const payeeAgentId = await actingAgent();
+
 					const message = (await client.get(
 						`/messages/${messageId}`,
 					)) as MessageRead;
@@ -133,15 +139,22 @@ export function registerFulfill(program: Command): void {
 						process.exitCode = 1;
 						return;
 					}
-					const agents = await fetchAgents(client);
-					const payeeAgentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
 					if (payeeAgentId === payerAgentId) {
 						printError("Cannot fulfill your own payment.");
+						process.exitCode = 1;
+						return;
+					}
+					// A payment is sealed to the ONE agent it was addressed to.
+					// Settling as a sibling cannot work — and without this the first
+					// symptom is `decryptMessage` failing to open an envelope it has
+					// no key for, which reads as broken crypto rather than the wrong
+					// agent. Name the addressee, and do it before the facilitator is
+					// reached and before any receipt is threaded.
+					if (message.to_agent_id && message.to_agent_id !== payeeAgentId) {
+						printError(
+							`Payment ${messageId} is addressed to agent ${message.to_agent_id}, not ${payeeAgentId}. ` +
+								"Fulfill as that agent (--agent) — only the addressee holds the key that opens it.",
+						);
 						process.exitCode = 1;
 						return;
 					}
@@ -166,25 +179,30 @@ export function registerFulfill(program: Command): void {
 						return;
 					}
 
-					// Decrypt the signed payment → verbatim x402 PaymentPayload object.
+					// Decrypt the signed payment → verbatim x402 PaymentPayload object. The
+					// envelope's signature is checked against the payer the server
+					// authenticated as the payment's sender.
 					const decrypted = await decryptMessage(
 						configDir,
 						payeeAgentId,
 						message.encrypted_payload,
 						client,
+						payerAgentId,
 					);
-					// A structurally malformed payment (no `accepted` / no signed
-					// authorization) is a typed, catchable refusal — thread a graceful
-					// payment-failed receipt so the payer reaches a terminal state,
-					// never a stack trace.
+					// A payment is only the payer's word when the payer signed it, and a
+					// structurally malformed one (no `accepted` / no signed authorization)
+					// cannot be acted on either. Both are typed, catchable refusals —
+					// thread a graceful payment-failed receipt so the payer reaches a
+					// terminal state, never a stack trace.
 					let pp: PaymentPayload;
 					try {
 						pp = parseX402Payload(
 							message.type,
-							decrypted.plaintext,
+							requireAuthenticPlaintext(decrypted, payerAgentId, messageId),
 						) as PaymentPayload;
 					} catch (err) {
 						if (!(err instanceof X402Error)) throw err;
+						const resealed = err.code === X402_ERROR.INAUTHENTIC_SENDER;
 						const sent = await sendReceipt({
 							client,
 							configDir,
@@ -194,10 +212,14 @@ export function registerFulfill(program: Command): void {
 							receiptBody: refusalReceiptBody("", "", err.code),
 							emitMarker: opts.marker !== false,
 						});
-						printError(`Malformed payment payload: ${err.message}`);
+						printError(
+							resealed
+								? `Refusing to settle: ${err.message}`
+								: `Malformed payment payload: ${err.message}`,
+						);
 						if (gOpts.json)
 							printJson({
-								status: "malformed-payload",
+								status: resealed ? "payment-refused" : "malformed-payload",
 								code: err.code,
 								detail: err.message,
 								receipt_id: sent.id,

@@ -4,18 +4,25 @@ vi.mock("eventsource-client", () => ({
 	createEventSource: vi.fn(),
 }));
 
-vi.mock("@rine-network/core", () => ({
+// Spread the real module so helpers the command uses but does not need stubbed
+// (e.g. the authenticity predicate) keep their real behaviour.
+vi.mock("@rine-network/core", async (importOriginal) => ({
+	...((await importOriginal()) as Record<string, unknown>),
 	resolveConfigDir: vi.fn(() => "/fake/config"),
 	resolveApiUrl: vi.fn(() => "http://localhost:7001"),
 	fetchAgents: vi.fn(async () => [{ id: "agent-1", name: "bot" }]),
-	resolveAgent: vi.fn(async () => "agent-1"),
+	resolveAgent: vi.fn(async () => ({ agentId: "agent-1" })),
 	getOrRefreshToken: vi.fn(async () => "fake-token"),
 	jitteredRefreshMargin: vi.fn(() => 60),
 	formatError: vi.fn((e: unknown) => String(e)),
 	agentKeysExist: vi.fn(() => false),
 	ingestSenderKeyDistribution: vi.fn(),
 	decryptMessage: vi.fn(),
-	decryptGroupMessage: vi.fn(),
+	// The group seam is the RECOVERY, not the bare decrypt: `stream` reaches the
+	// missing-key failure through core's one-shot ingest-and-retry, and stubbing
+	// the bare decrypt left the real recovery running underneath — a mock the
+	// code no longer calls.
+	decryptGroupMessageWithRecovery: vi.fn(),
 }));
 
 vi.mock("../src/action.js", () => ({
@@ -30,10 +37,6 @@ vi.mock("../src/output.js", () => ({
 	printError: vi.fn(),
 }));
 
-vi.mock("../src/commands/sender-key-ops.js", () => ({
-	fetchAndIngestPendingSKDistributions: vi.fn(async () => 0),
-}));
-
 vi.mock("../src/commands/stream-cursor.js", () => ({
 	loadStreamCursor: vi.fn(() => undefined),
 	saveStreamCursor: vi.fn(),
@@ -43,11 +46,14 @@ import { createEventSource } from "eventsource-client";
 import { Command } from "commander";
 import { registerStream } from "../src/commands/stream.js";
 import {
+	SENDER_KEY_UNAVAILABLE_PREVIEW,
+	UNKNOWN_SENDER_KEY_CLAUSE,
 	agentKeysExist,
-	decryptGroupMessage,
+	decryptGroupMessageWithRecovery,
 	decryptMessage,
 } from "@rine-network/core";
 import { loadStreamCursor, saveStreamCursor } from "../src/commands/stream-cursor.js";
+import { printError } from "../src/output.js";
 
 const mockCreateEventSource = vi.mocked(createEventSource);
 const mockLoadCursor = vi.mocked(loadStreamCursor);
@@ -617,7 +623,7 @@ describe("rine stream", () => {
 
 	describe("message preview decryption", () => {
 		const mockAgentKeysExist = vi.mocked(agentKeysExist);
-		const mockDecryptGroup = vi.mocked(decryptGroupMessage);
+		const mockDecryptGroup = vi.mocked(decryptGroupMessageWithRecovery);
 		const mockDecryptDm = vi.mocked(decryptMessage);
 
 		const decrypted = (plaintext: string) =>
@@ -626,7 +632,7 @@ describe("rine stream", () => {
 				senderKid: "agent-2:sig",
 				verified: true,
 				verificationStatus: "verified",
-			}) as unknown as Awaited<ReturnType<typeof decryptMessage>>;
+			}) as unknown as Awaited<ReturnType<typeof decryptGroupMessageWithRecovery>>;
 
 		beforeEach(() => {
 			mockAgentKeysExist.mockReset();
@@ -641,6 +647,9 @@ describe("rine stream", () => {
 			mockDecryptGroup.mockReset();
 			mockDecryptDm.mockReset();
 		});
+
+		/** The server-authenticated sender of the streamed events below. */
+		const PEER_ID = "22222222-2222-2222-2222-222222222222";
 
 		async function previewOf(payload: Record<string, unknown>): Promise<string> {
 			const out = captureStdout();
@@ -672,10 +681,69 @@ describe("rine stream", () => {
 			return out.lines.join("\n");
 		}
 
+		/**
+		 * The same stream carrying SEVERAL events, and both channels it writes to:
+		 * the message lines on stdout, and the notices `printError` puts beside
+		 * them. One `rine stream` invocation is one render, which is exactly what
+		 * the explain-once rule is scoped to.
+		 */
+		async function previewsOf(
+			payloads: Array<Record<string, unknown>>,
+		): Promise<{ lines: string[]; notices: string[] }> {
+			const out = captureStdout();
+			const stderr = captureStderr();
+			vi.mocked(printError).mockClear();
+
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				Promise.resolve().then(async () => {
+					for (const payload of payloads) {
+						opts.onMessage({
+							event: "message",
+							data: JSON.stringify(payload),
+							id: null,
+						});
+						// Let each line settle before the next arrives, so the order
+						// under test is the order the events arrived in.
+						for (let i = 0; i < 5; i++) {
+							await new Promise((r) => setImmediate(r));
+						}
+					}
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream"]);
+			for (let i = 0; i < 5; i++) {
+				await new Promise((r) => setImmediate(r));
+			}
+			out.restore();
+			stderr.restore();
+
+			return {
+				lines: out.lines.filter((l) => l.trim() !== ""),
+				notices: vi
+					.mocked(printError)
+					.mock.calls.map((c) => String(c[0])),
+			};
+		}
+
+		const noKeyEvent = (n: number) => ({
+			id: `msg-${n}`,
+			from_agent_id: PEER_ID,
+			type: "rine.v1.group_message",
+			group_id: "group-1",
+			encryption_version: "sender-key-v1",
+			encrypted_payload: `AQID${n}`,
+		});
+
 		it("decrypts an mls-v1 group message", async () => {
 			mockDecryptGroup.mockResolvedValue(decrypted("group-mls-hello"));
 
 			const line = await previewOf({
+				from_agent_id: PEER_ID,
 				type: "rine.v1.group_message",
 				group_id: "group-1",
 				group_handle: "team",
@@ -683,12 +751,15 @@ describe("rine stream", () => {
 				encrypted_payload: "AQID",
 			});
 
+			// The recovery's own argument order: the client leads, because the
+			// ingest-and-retry it wraps is the thing that needs one.
 			expect(mockDecryptGroup).toHaveBeenCalledWith(
+				expect.anything(),
 				"/fake/config",
 				"agent-1",
 				"group-1",
 				"AQID",
-				expect.anything(),
+				PEER_ID,
 			);
 			expect(line).toContain("[\u2713] group-mls-hello");
 		});
@@ -697,6 +768,7 @@ describe("rine stream", () => {
 			mockDecryptDm.mockResolvedValue(decrypted("dm-hybrid-hello"));
 
 			const line = await previewOf({
+				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
 				encryption_version: "hpke-hybrid-v1",
 				encrypted_payload: "AwQF",
@@ -707,14 +779,99 @@ describe("rine stream", () => {
 				"agent-1",
 				"AwQF",
 				expect.anything(),
+				PEER_ID,
 			);
 			expect(line).toContain("[\u2713] dm-hybrid-hello");
+		});
+
+		it("names the cause when a sender key never arrived, not just the failure", async () => {
+			// The ingest stub answers 0, so the one-shot recovery has run
+			// and come back empty — the one decrypt failure a one-line preview
+			// can explain. `[decrypt failed]` named neither cause nor move.
+			mockDecryptGroup.mockRejectedValue(
+				new Error(`${UNKNOWN_SENDER_KEY_CLAUSE}sk-42`),
+			);
+
+			const line = await previewOf({
+				from_agent_id: PEER_ID,
+				type: "rine.v1.group_message",
+				group_id: "group-1",
+				encryption_version: "sender-key-v1",
+				encrypted_payload: "AQID",
+			});
+
+			expect(line).toContain(SENDER_KEY_UNAVAILABLE_PREVIEW);
+			expect(line).not.toContain("[decrypt failed]");
+			// The library's control string is never what the operator reads.
+			expect(line).not.toContain("unknown sender key id");
+		});
+
+		it("explains the missing sender key once per stream, beside the line", async () => {
+			// A stream is a render of many lines, so the paragraph is said
+			// once — and NOT inside the message line: this stream is read one
+			// message per line by monitors, and a ~600-character sentence spliced
+			// into a preview corrupts that for every reader of it.
+			mockDecryptGroup.mockRejectedValue(
+				new Error(`${UNKNOWN_SENDER_KEY_CLAUSE}sk-42`),
+			);
+
+			const { lines, notices } = await previewsOf([
+				noKeyEvent(1),
+				noKeyEvent(2),
+				noKeyEvent(3),
+			]);
+
+			// Every line carries the bounded marker and nothing longer.
+			expect(lines).toHaveLength(3);
+			for (const line of lines) {
+				expect(line).toContain(SENDER_KEY_UNAVAILABLE_PREVIEW);
+				expect(line).not.toContain("Ask the sender to post to the group");
+			}
+			// The explanation was given once, on its own channel, and names the key.
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("sk-42");
+			expect(notices[0]).toContain("Ask the sender to post to the group again");
+			expect(notices[0]).not.toContain("unknown sender key id");
+		});
+
+		it("hands every marked line the id its own remedy needs", async () => {
+			// The marker promises the full sentence is one `rine message read`
+			// away. Without the id on the line, an operator who scrolled past the
+			// once-per-stream notice had to run `rine message list` and correlate
+			// by timestamp and sender to find out which row it was — three steps
+			// and a guess, on the only MULTI surface that did not carry an id.
+			mockDecryptGroup.mockRejectedValue(
+				new Error(`${UNKNOWN_SENDER_KEY_CLAUSE}sk-42`),
+			);
+
+			const { lines } = await previewsOf([noKeyEvent(1), noKeyEvent(2)]);
+
+			expect(lines[0]).toContain("rine message read msg-1");
+			expect(lines[1]).toContain("rine message read msg-2");
+			// Still bounded: the id is ~40 characters, not the ~600-character
+			// paragraph the marker exists to keep off the line.
+			for (const line of lines) {
+				expect(line).not.toContain("Ask the sender to post to the group");
+			}
+		});
+
+		it("does not re-explain the missing sender key on a later event", async () => {
+			// The assertion that catches a per-EVENT explainer: with one, every
+			// unopenable message in a long-running stream repeats the paragraph.
+			mockDecryptGroup.mockRejectedValue(
+				new Error(`${UNKNOWN_SENDER_KEY_CLAUSE}sk-42`),
+			);
+
+			const { notices } = await previewsOf([noKeyEvent(1), noKeyEvent(2)]);
+
+			expect(notices).toHaveLength(1);
 		});
 
 		it("reports [decrypt failed] when an mls-v1 group message cannot be decrypted", async () => {
 			mockDecryptGroup.mockRejectedValue(new Error("No MLS state for group"));
 
 			const line = await previewOf({
+				from_agent_id: PEER_ID,
 				type: "rine.v1.group_message",
 				group_id: "group-1",
 				encryption_version: "mls-v1",
@@ -729,6 +886,7 @@ describe("rine stream", () => {
 			mockDecryptDm.mockRejectedValue(new Error("no PQ encryption key"));
 
 			const line = await previewOf({
+				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
 				encryption_version: "hpke-hybrid-v1",
 				encrypted_payload: "AwQF",
@@ -738,8 +896,39 @@ describe("rine stream", () => {
 			expect(line).not.toContain("[encrypted]");
 		});
 
+		it("never previews content signed by someone other than the event's sender", async () => {
+			mockDecryptDm.mockResolvedValue({
+				plaintext: "authentic content of another agent",
+				senderKid: "rine:someone-else",
+				verified: false,
+				verificationStatus: "sender-mismatch",
+			} as unknown as Awaited<ReturnType<typeof decryptMessage>>);
+
+			const line = await previewOf({
+				from_agent_id: PEER_ID,
+				type: "rine.v1.dm",
+				encryption_version: "hpke-hybrid-v1",
+				encrypted_payload: "AwQF",
+			});
+
+			expect(line).toContain("sender mismatch");
+			expect(line).not.toContain("authentic content of another agent");
+		});
+
+		it("leaves an event with no server-authenticated sender sealed", async () => {
+			const line = await previewOf({
+				type: "rine.v1.dm",
+				encryption_version: "hpke-hybrid-v1",
+				encrypted_payload: "AwQF",
+			});
+
+			expect(line).toContain("[encrypted]");
+			expect(mockDecryptDm).not.toHaveBeenCalled();
+		});
+
 		it("leaves an unsupported encryption version as [encrypted]", async () => {
 			const line = await previewOf({
+				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
 				encryption_version: "hpke-org-v1",
 				encrypted_payload: "AwQF",

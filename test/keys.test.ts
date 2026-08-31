@@ -8,15 +8,15 @@ import * as actionModule from "../src/action.js";
 import { registerKeys } from "../src/commands/keys.js";
 import * as outputModule from "../src/output.js";
 
-// A9 / regression for T3: PQ (ML-KEM) private keys must survive a
-// `keys export` -> `keys import` round-trip. The hybrid PQ work added a
-// 2400-byte pq_encryption.key alongside the classical signing/encryption
-// keys; if export drops the field or import never writes the file, an
-// hpke-hybrid-v1 agent silently loses post-quantum decryptability.
+// PQ (ML-KEM) private keys must survive a `keys export` -> `keys import`
+// round-trip. The hybrid PQ work added a 2400-byte pq_encryption.key
+// alongside the classical signing/encryption keys; if export drops the field
+// or import never writes the file, an hpke-hybrid-v1 agent silently loses
+// post-quantum decryptability.
 //
 // These tests drive the REAL `registerKeys` export+import commands against
 // real temp config directories and real key material, then load the result
-// back and assert the PQ key bytes are identical. Reverting T3 (export
+// back and assert the PQ key bytes are identical. Reverting the fix (export
 // omitting pq_encryption_private_key, or import not writing pq_encryption.key)
 // makes the round-tripped pqEncryption disappear and fails the assertions.
 
@@ -56,7 +56,7 @@ beforeEach(() => {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, handle: "bot@org.rine.network" } as never,
 	]);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(AGENT_ID);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: AGENT_ID });
 });
 
 afterEach(() => {
@@ -84,7 +84,7 @@ function pqPrivB64(keys: core.AgentKeys): string {
 	return core.toBase64Url(pq.privateKey);
 }
 
-describe("keys export/import — PQ key round-trip (A9 / T3)", () => {
+describe("keys export/import — PQ key round-trip", () => {
 	it("preserves the post-quantum key through export then import", async () => {
 		// Real key material including an ML-KEM-768 PQ keypair.
 		const agentKeys = core.generateAgentKeys();

@@ -79,11 +79,10 @@ describe("verify-identity command", () => {
 		});
 	});
 
-	it("passes an explicit --agent through to resolution", async () => {
-		const resolveSpy = vi
-			.spyOn(core, "resolveAgent")
-			.mockResolvedValue("agent-uuid");
-		vi.spyOn(core, "verifyIdentitySpiffe").mockResolvedValue(RESULT);
+	it("acts as the agent --agent names, by its bare name", async () => {
+		const spy = vi
+			.spyOn(core, "verifyIdentitySpiffe")
+			.mockResolvedValue(RESULT);
 		const { program } = makeProgram({ json: false });
 
 		await program.parseAsync([
@@ -96,12 +95,9 @@ describe("verify-identity command", () => {
 			"jwt",
 		]);
 
-		expect(resolveSpy).toHaveBeenCalledWith(
-			"https://test.rine.network",
-			[AGENT],
-			"my-agent",
-			undefined,
-		);
+		expect(spy).toHaveBeenCalledWith(expect.anything(), AGENT.id, {
+			svid: "jwt",
+		});
 	});
 
 	it("prints the typed result as JSON in --json mode", async () => {

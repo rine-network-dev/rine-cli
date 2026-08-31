@@ -18,6 +18,7 @@
 import {
 	type MessageRead,
 	type PaymentRequired,
+	ACTING_AGENT_HEADER,
 	X402Error,
 	X402_MESSAGE_TYPE,
 	agentKeysExist,
@@ -25,20 +26,20 @@ import {
 	buildPaymentPayload,
 	decryptMessage,
 	encryptMessage,
-	fetchAgents,
 	fetchRecipientKeys,
 	isAutoPayable,
 	loadPolicy,
 	loadWalletKey,
 	parseX402Payload,
 	readDailySpent,
+	requireAuthenticPlaintext,
 	reserveSpend,
-	resolveAgent,
 	selectRequirement,
 	walletKeyExists,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { printError, printJson, printTable } from "../output.js";
 
 export function registerPay(program: Command): void {
@@ -51,7 +52,9 @@ export function registerPay(program: Command): void {
 			"<message-id>",
 			"ID of the received rine.v1.x402_payment_required",
 		)
-		.option("--agent <id>", "Payer agent ID (defaults to your agent)")
+		.addOption(actorOption(
+			"which agent is acting, as payer (name, handle, or agent ID)",
+		))
 		.option(
 			"--auto-pay",
 			"Only pay when the quote is at/below the wallet autoPayThreshold",
@@ -65,7 +68,7 @@ export function registerPay(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir, apiUrl },
+					{ client, gOpts, configDir, actingAgent },
 					messageId: string,
 					opts: {
 						agent?: string;
@@ -74,6 +77,9 @@ export function registerPay(program: Command): void {
 						marker?: boolean;
 					},
 				) => {
+					// Resolved BEFORE the fetch (see `ActorLadder.actingAgent`).
+					const payerAgentId = await actingAgent();
+
 					const message = (await client.get(
 						`/messages/${messageId}`,
 					)) as MessageRead;
@@ -93,16 +99,22 @@ export function registerPay(program: Command): void {
 						return;
 					}
 
-					const agents = await fetchAgents(client);
-					const payerAgentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
-
 					if (payeeAgentId === payerAgentId) {
 						printError("Cannot pay your own quote.");
+						process.exitCode = 1;
+						return;
+					}
+					// A quote is sealed to the ONE agent it was addressed to. Paying
+					// as a sibling cannot work — but without this the first thing to
+					// notice is `decryptMessage` failing to open an envelope it has no
+					// key for, which reads as broken crypto rather than the wrong
+					// agent. Name the addressee, and do it before anything local is
+					// spent or signed.
+					if (message.to_agent_id && message.to_agent_id !== payerAgentId) {
+						printError(
+							`Quote ${messageId} is addressed to agent ${message.to_agent_id}, not ${payerAgentId}. ` +
+								"Pay as that agent (--agent), or ask the payee to re-issue the quote to this one.",
+						);
 						process.exitCode = 1;
 						return;
 					}
@@ -121,17 +133,31 @@ export function registerPay(program: Command): void {
 						return;
 					}
 
-					// Decrypt the quote → verbatim x402 PaymentRequired object.
+					// Decrypt the quote → verbatim x402 PaymentRequired object. The
+					// envelope's signature is checked against the payee the server
+					// authenticated as the quote's sender.
 					const decrypted = await decryptMessage(
 						configDir,
 						payerAgentId,
 						message.encrypted_payload,
 						client,
+						payeeAgentId,
 					);
-					const pr = parseX402Payload(
-						message.type,
-						decrypted.plaintext,
-					) as PaymentRequired;
+					// A quote is only the payee's word when the payee signed it: an
+					// envelope re-sealed by a third party is refused here, before the
+					// wallet is asked to sign an authorization against its terms.
+					let pr: PaymentRequired;
+					try {
+						pr = parseX402Payload(
+							message.type,
+							requireAuthenticPlaintext(decrypted, payeeAgentId, messageId),
+						) as PaymentRequired;
+					} catch (err) {
+						if (!(err instanceof X402Error)) throw err;
+						printError(`Payment refused: ${err.message}`);
+						process.exitCode = 1;
+						return;
+					}
 
 					const policy = loadPolicy(configDir, payerAgentId);
 					const dailySpent = readDailySpent(configDir, payerAgentId);
@@ -198,7 +224,7 @@ export function registerPay(program: Command): void {
 						const sent = (await client.post(
 							`/messages/${messageId}/reply`,
 							body,
-							{ "X-Rine-Agent": payerAgentId },
+							{ [ACTING_AGENT_HEADER]: payerAgentId },
 						)) as MessageRead;
 
 						if (gOpts.json) {

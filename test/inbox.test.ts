@@ -27,7 +27,7 @@ function mockCoreAgentResolution(): void {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, handle: "bot@org.rine.network" } as never,
 	]);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(AGENT_ID);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: AGENT_ID });
 }
 
 function makeInboxResponse(items: Partial<core.MessageRead>[] = []) {

@@ -1,7 +1,11 @@
 import type { Command } from "commander";
 import { withErrorHandler } from "../action.js";
-import { HttpClient, resolveApiUrl } from "@rine-network/core";
-import { printJson, printTable } from "../output.js";
+import { HttpClient, UUID_RE, resolveApiUrl } from "@rine-network/core";
+import { printError, printJson, printTable } from "../output.js";
+import {
+	DIRECTORY_GROUP_ID_HELP,
+	directoryGroupUuidRefusal,
+} from "./group-target.js";
 
 export function registerDiscoverGroups(
 	discover: Command,
@@ -55,9 +59,21 @@ export function registerDiscoverGroups(
 	groupsCmd
 		.command("inspect")
 		.description("Inspect a public group")
-		.argument("<group-id>", "Group ID")
+		.argument("<group-id>", DIRECTORY_GROUP_ID_HELP)
 		.action(
 			withErrorHandler(program, async (gOpts, groupId: string) => {
+				// 🔴 The one group argument the handle-and-name widening does NOT reach.
+				// This verb reads the PUBLIC directory, not the caller's own group
+				// list, so the member ladder has nothing to match a handle or a name
+				// against: `/directory/groups/{name}` used to come back 200 with a
+				// table of empty cells, which is worse than a refusal because it looks
+				// like an answer. The shape is refused before any request, the same way
+				// `rine discover inspect` refuses an unresolvable agent.
+				if (!UUID_RE.test(groupId)) {
+					printError(directoryGroupUuidRefusal(groupId));
+					process.exitCode = 1;
+					return;
+				}
 				const apiUrl = resolveApiUrl();
 				const data = (await HttpClient.publicGet(
 					apiUrl,

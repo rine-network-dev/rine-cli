@@ -20,6 +20,8 @@ import { registerFulfill } from "../src/commands/fulfill.js";
 const API_URL = "https://test.rine.network";
 const PAYER = "11111111-1111-1111-1111-111111111111";
 const PAYEE = "22222222-2222-2222-2222-222222222222";
+/** A third agent that re-seals the payer's signed payment and posts it as its own. */
+const RESEALER = "33333333-3333-3333-3333-333333333333";
 const MESSAGE_ID = "payment-msg-1";
 // The quote message the payment answers — carried in the signed payload.
 const QUOTE_ID = "quote-msg-1";
@@ -143,7 +145,7 @@ beforeEach(() => {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: PAYEE, name: "payee" },
 	] as never);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(PAYEE);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: PAYEE });
 	vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
 
 	vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
@@ -220,6 +222,14 @@ describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => 
 		expect(receiptParams?.payeeAgentId).toBe(PAYEE);
 		expect(receiptParams?.receiptBody).toEqual(SETTLEMENT);
 		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("checks the payment envelope against the payer the server says sent it", async () => {
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		const args = (core.decryptMessage as ReturnType<typeof vi.fn>).mock
+			.calls[0] as unknown[];
+		// Never the kid or the `sender_signing_kid` header the sender supplied.
+		expect(args[4]).toBe(PAYER);
 	});
 
 	it("binds the settle to the answered payment + conversation + payee", async () => {
@@ -346,6 +356,89 @@ describe("rine fulfill — typed refusal routing (fail closed)", () => {
 			receipt_id: "receipt-msg-1",
 		});
 		expect(process.exitCode).toBe(1);
+	});
+});
+
+describe("rine fulfill — sender binding on the money path", () => {
+	/** The payment decrypts and parses; only its signer is wrong. */
+	function resealedPayment(status: string): void {
+		(core.decryptMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+			plaintext: paymentPlaintext,
+			senderKid: `rine:${RESEALER}`,
+			verified: false,
+			verificationStatus: status,
+		} as never);
+	}
+
+	it("REFUSES a payment the row's sender did not sign, and still terminates the thread", async () => {
+		resealedPayment("sender-mismatch");
+
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+
+		// A payer-signed authorization inside a re-sealed envelope never reaches the
+		// facilitator: nothing is reconciled and nothing is settled.
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		// Fail closed still means a terminal state for the thread it arrived in.
+		expect(receiptParams?.receiptBody).toMatchObject({
+			success: false,
+			errorReason: core.X402_ERROR.INAUTHENTIC_SENDER,
+		});
+		expect(lastJson()).toMatchObject({
+			status: "payment-refused",
+			code: core.X402_ERROR.INAUTHENTIC_SENDER,
+			receipt_id: "receipt-msg-1",
+		});
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("REFUSES it under the out-of-band --expect terms as well", async () => {
+		// The override short-circuits the quote-ref binding, so this is the mode in
+		// which a re-sealed payment would otherwise settle into the payee's own
+		// wallet with the receipt and the goods routed to the resealer.
+		resealedPayment("sender-mismatch");
+
+		await run(
+			"fulfill",
+			MESSAGE_ID,
+			"--facilitator",
+			"https://fac.test",
+			"--pay-to",
+			PAY_TO,
+			"--expect-amount",
+			"0.10",
+			"--expect-asset",
+			REGISTRY_EURC,
+			"--expect-network",
+			SEPOLIA,
+		);
+
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("REFUSES a payment whose signature does not check out", async () => {
+		resealedPayment("invalid");
+
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(lastJson()).toMatchObject({
+			status: "payment-refused",
+			code: core.X402_ERROR.INAUTHENTIC_SENDER,
+		});
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("settles a payment the row's sender did sign (false-positive guard)", async () => {
+		// The identical payment, correctly attributed, still settles — without this
+		// the refusals above would pass against a gate that refuses everything.
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+
+		expect(core.settleToReceipt).toHaveBeenCalledTimes(1);
+		expect(receiptParams?.receiptBody).toEqual(SETTLEMENT);
+		expect(process.exitCode).toBeUndefined();
 	});
 });
 
@@ -489,8 +582,30 @@ describe("rine fulfill — failure branches (typed outcomes)", () => {
 		expect(core.sendReceipt).not.toHaveBeenCalled();
 	});
 
+	it("refuses a payment addressed to a sibling, naming the addressee (exit 1)", async () => {
+		// The payment is sealed to RESEALER; this invocation acts as PAYEE. Only
+		// the addressee holds the key that opens it, so the settle was never
+		// going to happen — but the first symptom used to be an opaque decrypt
+		// failure. Refuse before the facilitator or any receipt, and say which
+		// agent it was for.
+		(
+			core.HttpClient.prototype.get as ReturnType<typeof vi.fn>
+		).mockResolvedValue(paymentMessage({ to_agent_id: RESEALER }));
+
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+
+		expect(process.exitCode).toBe(1);
+		const stderr = (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.map((c) => String(c[0]))
+			.join("\n");
+		expect(stderr).toContain(RESEALER);
+		expect(core.decryptMessage).not.toHaveBeenCalled();
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(core.sendReceipt).not.toHaveBeenCalled();
+	});
+
 	it("refuses fulfilling your own payment (exit 1)", async () => {
-		(core.resolveAgent as ReturnType<typeof vi.fn>).mockResolvedValue(PAYER);
+		(core.resolveAgent as ReturnType<typeof vi.fn>).mockResolvedValue({ agentId: PAYER });
 		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
 		expect(process.exitCode).toBe(1);
 		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();

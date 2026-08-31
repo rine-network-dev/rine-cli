@@ -8,15 +8,14 @@
 import {
 	type PaymentPolicy,
 	createWallet,
-	fetchAgents,
 	getWalletAddress,
 	loadPolicy,
-	resolveAgent,
 	savePolicy,
 	walletKeyExists,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import {
 	printError,
 	printJson,
@@ -39,21 +38,12 @@ export function registerWallet(program: Command): void {
 	wallet
 		.command("create")
 		.description("Create a payment wallet for an agent (refuses to overwrite)")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async (
-					{ client, gOpts, apiUrl, configDir },
-					opts: { agent?: string },
-				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+				async ({ gOpts, configDir, actingAgent }) => {
+					const agentId = await actingAgent();
 					if (walletKeyExists(configDir, agentId)) {
 						printError(
 							`Wallet already exists for agent ${agentId}. The private key is never overwritten.`,
@@ -77,21 +67,12 @@ export function registerWallet(program: Command): void {
 	wallet
 		.command("address")
 		.description("Print an agent's payment wallet address")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async (
-					{ client, gOpts, apiUrl, configDir },
-					opts: { agent?: string },
-				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+				async ({ gOpts, configDir, actingAgent }) => {
+					const agentId = await actingAgent();
 					if (!walletKeyExists(configDir, agentId)) {
 						printError(
 							`No wallet for agent ${agentId}. Run 'rine wallet create' first.`,
@@ -112,21 +93,12 @@ export function registerWallet(program: Command): void {
 	const policy = wallet
 		.command("policy")
 		.description("Show the effective spend policy (deny-by-default when unset)")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async (
-					{ client, gOpts, apiUrl, configDir },
-					opts: { agent?: string },
-				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+				async ({ gOpts, configDir, actingAgent }) => {
+					const agentId = await actingAgent();
 					const p = loadPolicy(configDir, agentId);
 					if (gOpts.json) {
 						printJson({
@@ -170,7 +142,7 @@ export function registerWallet(program: Command): void {
 		.description(
 			"Set the spend policy (all caps are decimal major-unit strings)",
 		)
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.requiredOption(
 			"--per-tx-cap <amount>",
 			"Max per-transaction spend, e.g. 5.00",
@@ -196,7 +168,7 @@ export function registerWallet(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, apiUrl, configDir },
+					{ gOpts, configDir, actingAgent },
 					opts: {
 						agent?: string;
 						perTxCap: string;
@@ -206,13 +178,7 @@ export function registerWallet(program: Command): void {
 						autoPayThreshold: string;
 					},
 				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+					const agentId = await actingAgent();
 					const next: PaymentPolicy = {
 						perTxCap: opts.perTxCap,
 						dailyCap: opts.dailyCap,

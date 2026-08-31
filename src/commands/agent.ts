@@ -4,9 +4,12 @@ import {
 	type AgentRead,
 	type ListResponse,
 	RineApiError,
+	compareVerificationWordsForAgent,
 	performAgentCreation,
+	verificationWordsLines,
 } from "@rine-network/core";
 import { toAgentRow } from "../agent-format.js";
+import { registerAgentVerify } from "./agent-verify.js";
 import {
 	printError,
 	printJson,
@@ -48,21 +51,24 @@ export function registerAgent(program: Command): void {
 						unlisted: opts.unlisted,
 					});
 
+					// Recomputed from the key just written to this config dir, never from
+					// the string the server sent back with the agent.
+					const verification = compareVerificationWordsForAgent(
+						configDir,
+						data.id,
+						data.verification_words,
+					);
+
 					if (gOpts.json) {
-						printJson(data);
+						printJson({ ...data, verification });
 					} else {
-						printTable([
-							toAgentRow(data, {
-								includeCard: true,
-								includeVerificationWords: true,
-							}),
-						]);
+						printTable([toAgentRow(data, { includeCard: true, verification })]);
 						console.log(
 							`\nAgent '${data.name}' created \u2014 reachable at ${data.handle}`,
 						);
 						console.log("E2EE keys generated and stored locally.");
-						if (data.verification_words) {
-							console.log(`Verification words: ${data.verification_words}`);
+						for (const line of verificationWordsLines(verification)) {
+							console.log(line);
 						}
 						if (data.poll_url) {
 							console.log(`Poll URL: ${data.poll_url}`);
@@ -220,4 +226,6 @@ export function registerAgent(program: Command): void {
 				},
 			),
 		);
+
+	registerAgentVerify(program, agent);
 }

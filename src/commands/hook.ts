@@ -16,14 +16,13 @@ import {
 	type HookListResponse,
 	RineApiError,
 	deleteHookSecret,
-	fetchAgents,
 	generateHookSecret,
 	hookNameError,
-	resolveAgent,
 	saveHookSecret,
 } from "@rine-network/core";
 import { type Command, Option } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import {
 	printError,
 	printJson,
@@ -68,7 +67,7 @@ export function registerHook(program: Command): void {
 		.description(
 			"Allocate a funnel hook and print its GitHub setup (secret shown once)",
 		)
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.option("--name <name>", "Hook name (default: default)", "default")
 		// TLS-termination tier. Omitting it sends null and the backend resolves the
 		// default for the org's trust tier — the CLI never recomputes that default
@@ -83,7 +82,7 @@ export function registerHook(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, apiUrl, configDir },
+					{ client, gOpts, configDir, actingAgent },
 					opts: { agent?: string; name: string; tier?: string },
 				) => {
 					const nameError = hookNameError(opts.name);
@@ -100,13 +99,7 @@ export function registerHook(program: Command): void {
 						process.exitCode = 2;
 						return;
 					}
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+					const agentId = await actingAgent();
 
 					// Generate + persist the secret BEFORE the POST (the allocation is
 					// non-idempotent): on a POST failure we delete it so no orphan secret
@@ -133,18 +126,12 @@ export function registerHook(program: Command): void {
 	hook
 		.command("list")
 		.description("List your agent's funnel hooks")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, apiUrl }, opts: { agent?: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+				async ({ client, gOpts,  actingAgent }) => {
+					const agentId = await actingAgent();
 					const data = (await client.get(
 						`/agents/${agentId}/funnel/hooks`,
 						{},
@@ -169,23 +156,17 @@ export function registerHook(program: Command): void {
 	hook
 		.command("delete")
 		.description("Delete a funnel hook and purge its local secret")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.requiredOption("--name <name>", "Hook name to delete")
 		.option("--yes", "Skip confirmation prompt")
 		.action(
 			withClient(
 				program,
 				async (
-					{ client, gOpts, apiUrl, configDir },
+					{ client, gOpts, configDir, actingAgent },
 					opts: { agent?: string; name: string; yes?: boolean },
 				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+					const agentId = await actingAgent();
 					if (!opts.yes && !gOpts.json) {
 						const confirmed = await promptConfirm(
 							`Delete funnel hook '${opts.name}'?`,

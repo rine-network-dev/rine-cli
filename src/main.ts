@@ -29,9 +29,14 @@ const program = new Command("rine")
 	.option("--profile <name>", "credential profile to use", "default")
 	.option("--json", "output as JSON")
 	.option("--table", "output as table")
+	// The retired spelling of `--agent`, still accepted. It stays on the
+	// program because that is where it has always been and moving it would
+	// break every script that types `rine --as bob …`; `--agent` cannot join it
+	// here, because a program-level option is resolved against the whole argv
+	// and would steal the flag from `onboard`, `send` and `group invite`.
 	.option(
 		"--as <agent>",
-		"act as a specific agent (UUID, handle, or bare name e.g. kofi)",
+		"which agent is acting — the retired spelling of --agent (name, handle, or agent ID)",
 	);
 
 registerAuth(program);

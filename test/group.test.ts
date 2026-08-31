@@ -20,7 +20,11 @@ import * as outputModule from "../src/output.js";
 
 const CONFIG_DIR = "/tmp/test-rine";
 const API_URL = "https://test.rine.network";
-const GROUP_ID = "group-open-1";
+// A UUID, because `rine group join` resolves its argument and the
+// join ladder's UUID rung is a passthrough — a bare name would send this
+// harness climbing rungs it stubs nothing for, which is a fixture fact and
+// not what these tests are about.
+const GROUP_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
 
 const MEMBER_RESPONSE = {
@@ -220,6 +224,33 @@ describe("group invites — authoritative agent-scoped pull", () => {
     expect(row["Invited By"]).toBe(INVITE_VOUCHER.invited_by);
     expect(row.Message).toBe("join us");
     expect(row.Created).toBe(INVITE_VOUCHER.created_at);
+    expect(row.Status).toBe("invited");
+  });
+
+  it("tells a nomination apart from an invitation by its status", async () => {
+    // The route answers live nominations too, and this is the
+    // only place an agent that is not yet a member can see the one filed for
+    // it. Without the column that row reads as an invitation to accept, which
+    // is false: a nomination seats nobody until the electorate decides.
+    stubInvitesGet([
+      {
+        ...INVITE_VOUCHER,
+        id: "req-2",
+        status: "pending",
+      } as core.JoinRequestRead,
+    ]);
+    const printTableSpy = vi
+      .spyOn(outputModule, "printTable")
+      .mockImplementation(() => {});
+
+    const program = makeProgram({ json: false });
+    await program.parseAsync(["node", "rine", "group", "invites"]);
+
+    const rows = printTableSpy.mock.calls.at(-1)?.[0] as Record<
+      string,
+      unknown
+    >[];
+    expect(rows[0]?.Status).toBe("pending");
   });
 
   it("prints (no results) for an empty invite list", async () => {
@@ -302,13 +333,13 @@ describe("group invite — best-effort invite notification", () => {
         return Promise.reject(new Error(`Unknown GET: ${path}`));
       },
     );
-    // resolveToUuid maps the --agent flag to the invitee; resolveAgent maps
+    // resolveToUuid maps the --invitee flag to the invitee; resolveAgent maps
     // the sender selection to the inviter.
     vi.spyOn(core, "resolveToUuid").mockResolvedValue(INVITEE_ID);
     vi.spyOn(core, "fetchAgents").mockResolvedValue([
       { id: INVITER_ID, handle: "coach@org.rine.network" } as never,
     ]);
-    vi.spyOn(core, "resolveAgent").mockResolvedValue(INVITER_ID);
+    vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: INVITER_ID });
   }
 
   it("notifies the invitee with the locked type, inviter, and group handle", async () => {
@@ -324,7 +355,7 @@ describe("group invite — best-effort invite notification", () => {
       "group",
       "invite",
       INVITE_GROUP_ID,
-      "--agent",
+      "--invitee",
       INVITEE_ID,
       "--message",
       "welcome aboard",
@@ -367,7 +398,7 @@ describe("group invite — best-effort invite notification", () => {
       "group",
       "invite",
       INVITE_GROUP_ID,
-      "--agent",
+      "--invitee",
       INVITEE_ID,
     ]);
 
@@ -375,5 +406,78 @@ describe("group invite — best-effort invite notification", () => {
     // and the voucher row must still be rendered.
     expect(process.exitCode).toBeUndefined();
     expect(printTableSpy).toHaveBeenCalled();
+  });
+});
+
+// group leave — the departing member takes no group keys with it.
+//
+// Order is the requirement: the server DELETE runs first, so a refused leave
+// never strands a still-member without the keys to read its own group. Only
+// then is the local key material retired — MLS state for a closed group and
+// sender-key material for an open one, both unconditionally, because whichever
+// the group did not run costs one unlink that finds no file.
+//
+// What is printed is per group type and is covered in group-wave2.test.ts;
+// what these tests own is the ORDER and the fact that a refused leave retires
+// nothing.
+//
+// The retirement itself lives in `rine-core/src/group-removal-ops.ts` and is
+// asserted in `rine-core/test/group-removal-ops.test.ts`. rine-core reaches its
+// own primitives through relative imports, which a spy on the package export
+// binding cannot intercept through the bundle — so what is observable here is
+// the core verb the command calls, not the unlinks it makes.
+
+const LEAVE_GROUP_ID = "77777777-7777-7777-7777-777777777777";
+
+describe("group leave — local group key material is retired", () => {
+  function stubLeave(deleteImpl?: () => Promise<unknown>): void {
+    vi.spyOn(core, "fetchAgents").mockResolvedValue([
+      { id: AGENT_ID, handle: "bot@org.rine.network" },
+    ] as never);
+    vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: AGENT_ID });
+    vi.spyOn(core, "loadMlsState").mockReturnValue(null);
+    vi.spyOn(core, "deleteSenderKey").mockReturnValue(undefined);
+    vi.spyOn(core.HttpClient.prototype, "get").mockResolvedValue(
+      mlsGroup({ id: LEAVE_GROUP_ID }),
+    );
+    vi.spyOn(core.HttpClient.prototype, "delete").mockImplementation(
+      deleteImpl ?? (() => Promise.resolve(undefined)),
+    );
+  }
+
+  it("wipes the group's local key material after the server removal", async () => {
+    stubLeave();
+    const wipe = vi
+      .spyOn(core, "retireLocalGroupState")
+      .mockReturnValue({ retired: true });
+
+    const program = makeProgram({ json: true });
+    await program.parseAsync([
+      "node",
+      "rine",
+      "group",
+      "leave",
+      LEAVE_GROUP_ID,
+    ]);
+
+    expect(wipe).toHaveBeenCalledWith(CONFIG_DIR, AGENT_ID, LEAVE_GROUP_ID);
+  });
+
+  it("does NOT wipe local state when the server refuses the leave", async () => {
+    stubLeave(() => Promise.reject(new Error("403 not a member")));
+    const wipe = vi
+      .spyOn(core, "retireLocalGroupState")
+      .mockReturnValue({ retired: true });
+
+    const program = makeProgram({ json: true });
+    await program.parseAsync([
+      "node",
+      "rine",
+      "group",
+      "leave",
+      LEAVE_GROUP_ID,
+    ]);
+
+    expect(wipe).not.toHaveBeenCalled();
   });
 });

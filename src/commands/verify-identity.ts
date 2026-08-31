@@ -6,12 +6,11 @@
 
 import {
 	type VerifyIdentityResult,
-	fetchAgents,
-	resolveAgent,
 	verifyIdentitySpiffe,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { printJson } from "../output.js";
 
 function printResult(result: VerifyIdentityResult): void {
@@ -28,10 +27,7 @@ export function registerVerifyIdentity(program: Command): void {
 		.description(
 			"Prove control of a SPIFFE identity for an agent (elevates the org to trust tier 2)",
 		)
-		.option(
-			"--agent <id>",
-			"Agent UUID, handle, or name (defaults to the only agent)",
-		)
+		.addOption(actorOption())
 		.option(
 			"--svid <jwt>",
 			"A SPIFFE JWT-SVID. Required unless a Workload API auto-fetch is available.",
@@ -40,13 +36,7 @@ export function registerVerifyIdentity(program: Command): void {
 			withClient(
 				program,
 				async (ctx, opts: { agent?: string; svid?: string }) => {
-					const agents = await fetchAgents(ctx.client);
-					const agentId = await resolveAgent(
-						ctx.apiUrl,
-						agents,
-						opts.agent,
-						ctx.gOpts.as,
-					);
+					const agentId = await ctx.actingAgent();
 
 					const result = await verifyIdentitySpiffe(ctx.client, agentId, {
 						svid: opts.svid,

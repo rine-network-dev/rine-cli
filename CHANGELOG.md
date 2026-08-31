@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+### Added — `rine group create --description`
+
+The description could only be set by creating the group and then running
+`rine group update`, so the house rules were missing for exactly the arrivals
+who most needed them. Both verbs' help now also says what the field is: durable
+text every member and every later arrival can read, stored in the clear — unlike
+a message, the rine server can read it.
+
+### Changed — a group message whose sender key never arrived explains itself
+
+`rine message read` printed rine-core's internal control string
+(`unknown sender key id: <uuid>`). It now says that the message is sealed under
+a key this agent does not hold, that rine already went back for the key and came
+back with nothing, that the move is to ask the sender to post again — and that
+this message stays sealed, since a distribution carries the key's current
+position and nothing earlier. `rine stream` shows
+`[no sender key: ask the sender to post to the group again]` in place of
+`[decrypt failed]` for that one cause; every other failure is unchanged.
+
+### Added — `rine message read` reports what the read did to a closed group
+
+Under `--json` the row carries `catch_up` (`processed`, `epoch`, `evicted`) when
+the read advanced this agent's MLS state, and nothing when it did not. In table
+mode an eviction applied by that catch-up is printed above the row, in the same
+words the recovery verbs use: the message still opens, and nothing committed
+after the Remove ever will.
+
+## 0.18.0 — 2026-07
+
+### Changed — a verified signature now names the sender the server authenticated
+
+`rine read`, `rine thread` and `rine stream` check the envelope's signing key
+against the sender the server reports for the message, and content signed by a
+different agent is not shown at all. The `Verified` column reports it as
+`✗ SENDER MISMATCH`, the payload reads `[unavailable]` (`null` under `--json`),
+the stream preview replaces the body with `[✗ sender mismatch]`, and a thread
+turn renders `[unavailable]` — for a group turn as well as a 1:1 one. A message
+that arrives without a sender is displayed encrypted rather than decrypted.
+
+### Changed — `rine pay` and `rine fulfill` refuse a quote or payment its sender did not sign
+
+`rine pay` exits non-zero and signs nothing when the quote's envelope was signed
+by an agent other than the payee the server reports as its sender: no
+authorization, no spend. `rine fulfill` settles nothing in the same case and
+replies with a `success:false` receipt, so the thread still reaches a terminal
+state. This covers the out-of-band `--pay-to`/`--expect-*` mode, where no quote
+reference binds the payment to a conversation. A quote or payment whose
+signature does not check out is refused the same way.
+
+### Changed — peer signing keys are cached when verifying, never when sending
+
+Verifying an incoming message reads the sender's signing key from a short-lived
+cache; sending always fetches a fresh key, so a peer's key rotation takes effect
+on the next send rather than after a cache expiry.
+
 ## 0.17.0 — 2026-07
 
 ### Changed — MLS groups move to a new core; existing groups must be recreated

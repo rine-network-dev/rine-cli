@@ -1,90 +1,42 @@
 import * as fs from "node:fs";
 import {
-	type GroupRead,
 	type HttpClient,
-	type ListResponse,
 	type MessageRead,
+	ACTING_AGENT_HEADER,
+	MlsInitInFlightError,
 	type PaginatedResponse,
 	RineApiError,
-	type ThreadRow,
-	type ThreadRowEntry,
 	agentKeysExist,
-	decryptGroupMessage,
-	decryptMessage,
-	decryptThreadRow,
+	assertNoMlsDowngrade,
+	decryptThreadRows,
 	encryptGroupMessage,
 	encryptMessage,
 	encryptMlsGroupMessage,
-	fetchAgents,
 	fetchRecipientKeys,
-	ingestSenderKeyDistribution,
+	groupAcceptsMlsSendOnly,
+	isNoMlsStateError,
 	normalizeHandle,
 	processMlsWelcomes,
-	resolveAgent,
+	readThreadPage,
+	resolveGroupByHandle,
+	resolveThreadRef,
 	resolveToUuid,
 	syncMlsGroup,
+	THREAD_REF_SURFACES,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorAliasOption, actorOption } from "../actor.js";
+import { announceHandleCompletion } from "../handle-completion.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import { x402SendExtras } from "../x402.js";
 import {
-	fetchAndIngestPendingSKDistributions,
-	getOrCreateSenderKey,
-} from "./sender-key-ops.js";
-
-function msgFrom(m: MessageRead): string {
-	return m.sender_handle ?? m.from_agent_id ?? "";
-}
-
-function msgTo(m: MessageRead): string {
-	return m.recipient_handle ?? m.to_agent_id ?? "";
-}
-
-function msgGroup(m: MessageRead): string {
-	return m.group_handle ?? "";
-}
-
-function sendRow(m: MessageRead): Record<string, unknown> {
-	return {
-		ID: m.id,
-		"Conversation ID": m.conversation_id,
-		From: msgFrom(m),
-		To: msgTo(m),
-		Group: msgGroup(m),
-		Type: m.type,
-		Created: m.created_at,
-	};
-}
-
-function inboxRow(m: MessageRead): Record<string, unknown> {
-	return {
-		ID: m.id,
-		From: msgFrom(m),
-		Group: msgGroup(m),
-		Type: m.type,
-		Status: (m.status ?? "new").toUpperCase(),
-		Created: m.created_at,
-	};
-}
-
-/** One thread turn rendered as a role-tagged row (`[sent]` you / `[received]`). */
-function threadRow(e: ThreadRowEntry): Record<string, unknown> {
-	const who = e.direction === "sent" ? "you" : (e.sender_handle ?? "unknown");
-	return {
-		Direction: `[${e.direction}]`,
-		From: who,
-		Type: e.type,
-		Verified:
-			e.verification_status === "verified"
-				? "✓"
-				: e.verification_status === "invalid"
-					? "✗ INVALID"
-					: "?",
-		Text: e.text,
-		Created: e.created_at,
-	};
-}
+	GROUP_REFERENCE_HELP,
+	withEvictionPointerIfHeld,
+} from "./group-target.js";
+import { addReadCommand } from "./messages-read.js";
+import { inboxRow, sendRow, threadRow } from "./messages-rows.js";
+import { getOrCreateSenderKey } from "./sender-key-ops.js";
 
 function resolvePayload(
 	payload?: string,
@@ -120,18 +72,6 @@ function resolvePayload(
 	}
 }
 
-async function resolveGroup(
-	client: HttpClient,
-	handle: string,
-): Promise<GroupRead> {
-	const list = (await client.get("/groups", {
-		handle,
-	})) as ListResponse<GroupRead>;
-	const group = list.items?.[0];
-	if (!group) throw new Error(`Group not found: ${handle}`);
-	return group;
-}
-
 // MLS group send: always sync to the latest epoch before encrypting so that
 // newer members (who joined via external commit) can decrypt.  If no local
 // state exists yet, install pending welcomes + sync, then encrypt.
@@ -142,7 +82,7 @@ async function encryptMlsWithRecovery(
 	groupId: string,
 	payload: unknown,
 ): Promise<ReturnType<typeof encryptMlsGroupMessage>> {
-	const hdrs = { "X-Rine-Agent": senderAgentId };
+	const hdrs = { [ACTING_AGENT_HEADER]: senderAgentId };
 	// Pre-sync: advance local epoch so we encrypt at the group's current state.
 	// Failures are non-fatal — the "No MLS state" recovery below handles them.
 	await processMlsWelcomes(configDir, senderAgentId, client).catch(() => {});
@@ -158,11 +98,17 @@ async function encryptMlsWithRecovery(
 			payload,
 		);
 	} catch (err) {
-		if (
-			err instanceof Error &&
-			err.message.startsWith("No MLS state for group")
-		) {
-			await processMlsWelcomes(configDir, senderAgentId, client);
+		// The predicate rine-core owns, not a copy of its message text.
+		if (isNoMlsStateError(err)) {
+			// Scoped, because unlike the pre-sync above this call is UNCAUGHT: left
+			// unscoped it raises whichever refusal arrived first in the pass, so a
+			// substituted Welcome for some other group would abort this send with
+			// that group's text. `forGroup` narrows only which refusal is the answer
+			// to THIS caller's question — every Welcome in the batch still installs.
+			// The Python twin reaches the same scoping via `install_mls_state`.
+			await processMlsWelcomes(configDir, senderAgentId, client, {
+				forGroup: groupId,
+			});
 			await syncMlsGroup(configDir, senderAgentId, groupId, client, hdrs);
 			return await encryptMlsGroupMessage(
 				configDir,
@@ -176,12 +122,28 @@ async function encryptMlsWithRecovery(
 }
 
 function addMessageCommands(parent: Command, program: Command): void {
+	addReadCommand(parent, program);
+
 	parent
 		.command("send")
 		.description("Send an encrypted message")
 		.requiredOption(
 			"--to <address>",
-			"Recipient: agent handle (agent@org), agent ID, or group handle (#group@org)",
+			// 🔴 It advertises no BARE name, and that ring-fence is narrower than it
+			// once was. `#logistics` — the sigil, no `@` — already resolves here:
+			// the sigil is what files a send as a group (below), and
+			// `resolveGroupByHandle`'s fallback retries a handle's local part
+			// against the org's own groups. The help advertises that shipped
+			// spelling; it widens no behaviour.
+			//
+			// 🔴 The bare-name rule is untouched by that, and this sentence must keep
+			// saying so: a bare `logistics`, no sigil, is an AGENT on this surface and
+			// is sent as `to_agent_id`. So the ring-fence now reads
+			// narrower and still holds — the CLI advertises and resolves
+			// `#logistics`, and advertises and resolves NEITHER a bare `logistics`
+			// as a group. A later migration will be tempted to erase the second
+			// half; it is a decision nobody has taken, not an omission.
+			"Recipient: an agent handle (kofi@acme.rine.network), an agent ID, or a group — by handle (#logistics@acme.rine.network) or by sigiled name (#logistics)",
 		)
 		.option("--type <type>", "Message type (default: rine.v1.dm)")
 		.option("--payload <json>", "Message payload as JSON string")
@@ -189,7 +151,13 @@ function addMessageCommands(parent: Command, program: Command): void {
 			"--payload-file <path>",
 			"Read payload JSON from file (use - for stdin)",
 		)
-		.option("--from <address>", "Sender: agent handle (agent@org) or agent ID")
+		.addOption(actorOption("which agent is acting, and sends"))
+		.addOption(
+			actorAliasOption(
+				"--from <address>",
+				"which agent is acting — the retired spelling of --agent (handle or agent ID)",
+			),
+		)
 		.option("--idempotency-key <key>", "Idempotency key header")
 		.option(
 			"--no-marker",
@@ -199,7 +167,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir, apiUrl },
+					ctx,
 					opts: {
 						to: string;
 						type?: string;
@@ -210,6 +178,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 						marker?: boolean;
 					},
 				) => {
+					const { client, gOpts, configDir, apiUrl, actingAgent } = ctx;
 					const result = resolvePayload(opts.payload, opts.payloadFile);
 					if ("error" in result) {
 						printError(result.error);
@@ -221,40 +190,47 @@ function addMessageCommands(parent: Command, program: Command): void {
 					const to = normalizeHandle(opts.to);
 					const from = opts.from ? normalizeHandle(opts.from) : opts.from;
 
+					// One ladder, whichever spelling named the sender: `--agent`,
+					// the retired `--from`, the program's `--as`, `RINE_AGENT`, or
+					// the org's only agent. `withClient` pinned `X-Rine-Agent`
+					// while resolving, so nothing here has to carry it per call.
+					const senderAgentId = await actingAgent();
+
 					const extraHeaders: Record<string, string> = {};
-					let senderAgentId: string | undefined;
-
-					if (from !== undefined) {
-						senderAgentId = await resolveToUuid(apiUrl, from);
-						extraHeaders["X-Rine-Agent"] = senderAgentId;
-					} else if (!gOpts.as) {
-						const agents = await fetchAgents(client);
-						senderAgentId = await resolveAgent(
-							apiUrl,
-							agents,
-							undefined,
-							undefined,
-						);
-						extraHeaders["X-Rine-Agent"] = senderAgentId;
-					} else {
-						const agents = await fetchAgents(client);
-						senderAgentId = await resolveAgent(
-							apiUrl,
-							agents,
-							undefined,
-							gOpts.as,
-						);
-					}
-
 					if (opts.idempotencyKey) {
 						extraHeaders["Idempotency-Key"] = opts.idempotencyKey;
 					}
 
-					// Resolve recipient ID for key fetch
+					// 🔴 The sigil decides this, not the `@`. A group is named
+					// `#logistics@acme.rine.network` OR `#logistics` — the second
+					// spelling has no `@`, and reading only the `@` filed it as an
+					// agent id: `#logistics` became `recipientAgentId` and, below,
+					// `to_agent_id`, while the group branch also set `to_handle`.
+					// `MessageCreate.check_exactly_one_destination` refuses both
+					// (`schemas.py`: "Provide exactly one of to_agent_id or
+					// to_handle, not both") — after the message has been sealed.
+					// The bare-name rule is untouched: a BARE `logistics`, no sigil, is still an
+					// agent on this surface and still resolves as one.
+					const isGroupSend = to.startsWith("#");
+
+					// Resolve recipient ID for key fetch. A group has no recipient
+					// agent — its key comes from the group, not from an agent row.
 					let recipientAgentId: string | undefined;
-					if (!to.includes("@")) {
+					if (isGroupSend) {
+						recipientAgentId = undefined;
+					} else if (!to.includes("@")) {
 						recipientAgentId = to;
-					} else if (!to.startsWith("#")) {
+					} else {
+						// 🔴 Item 18. `rine send` is the call site where a silent
+						// completion costs most: the message goes to whoever the
+						// completed handle names, and the caller is told nothing.
+						//
+						// 🔴 `opts.to`, NOT `to`. This surface is the one that
+						// normalises ahead of the branch — line 190 — so `to` is
+						// already the completed spelling and comparing it against its
+						// own normalisation can never differ. Handed `to`, the notice
+						// is dead code that reads exactly like a working one.
+						announceHandleCompletion(opts.to);
 						recipientAgentId = await resolveToUuid(apiUrl, to);
 					}
 
@@ -277,21 +253,60 @@ function addMessageCommands(parent: Command, program: Command): void {
 						if (x402.metadata) body.metadata = x402.metadata;
 					}
 
-					if (to.includes("@")) {
-						body.to_handle = to;
-					} else {
-						body.to_agent_id = to;
+					// The group arm sets `to_handle` from the RESOLVED row below and
+					// must not set a destination here — setting one makes the body
+					// carry two, which the server refuses outright.
+					if (!isGroupSend) {
+						if (to.includes("@")) {
+							body.to_handle = to;
+						} else {
+							body.to_agent_id = to;
+						}
 					}
 
 					if (from?.includes("@")) {
 						body.from_handle = from;
 					}
 
-					const isGroupSend = to.startsWith("#");
+					if (isGroupSend) {
+						// Resolve the group once: the server's account of its encryption
+						// is the only one a client gets, and both the guard and the
+						// branch read it.
+						//
+						// 🔴 The refusal is widened the same way the twelve member-ladder
+						// verbs widen theirs. `send` does not climb that
+						// ladder — it resolves the handle here — so without this an
+						// evicted agent gets the pointer from `rine group get` and a bare
+						// roster refusal from `rine send`, on the same spelling of the
+						// same group. The acting agent is already resolved above, so the
+						// gate costs no round trip here at all.
+						const group = await resolveGroupByHandle(client, to).catch(
+							async (err): Promise<never> => {
+								throw await withEvictionPointerIfHeld(ctx, err);
+							},
+						);
+						// 🔴 The wire carries the group the SERVER holds, never the
+						// spelling that was typed. `POST /messages` looks `to_handle`
+						// up by exact equality, and the handle fallback exists precisely
+						// because the two can differ — it resolves a handle whose ORG
+						// half is wrong, which is what a shortened or half-remembered
+						// handle is. Posting `to` sends that spelling: the message is
+						// sealed for the right group and then refused with a bare
+						// `Group not found`. The resolve alone was never the whole fix.
+						body.to_handle = group.handle;
+						// The SEND question, not the render question;
+						// `groupAcceptsMlsSendOnly` documents why `mls_group_id` alone
+						// walks into a server 409 during the init window.
+						const mlsOnly = groupAcceptsMlsSendOnly(group);
 
-					if (isGroupSend && senderAgentId) {
-						const group = await resolveGroup(client, to);
-						if (group.mls_group_id) {
+						// The guard goes HERE, between the resolve and the branch,
+						// because reaching the sender-key branch has already leaked the
+						// key (`assertNoMlsDowngrade`). No fallback, no sender-key retry.
+						assertNoMlsDowngrade(configDir, senderAgentId, group.id, mlsOnly);
+
+						if (mlsOnly) {
+							if (group.mls_group_id == null)
+								throw new MlsInitInFlightError(to);
 							// MLS-active group: use MLS encryption (keyed by rine group UUID)
 							const encResult = await encryptMlsWithRecovery(
 								client,
@@ -307,8 +322,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 								client,
 								configDir,
 								senderAgentId,
-								to,
-								Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+								group.handle,
 							);
 							const { result: encResult } = await encryptGroupMessage(
 								configDir,
@@ -319,7 +333,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 							);
 							Object.assign(body, encResult);
 						}
-					} else if (senderAgentId && recipientAgentId) {
+					} else if (recipientAgentId) {
 						// Direct send: use HPKE encryption (hybrid PQ when available)
 						const recipientKeys = await fetchRecipientKeys(
 							client,
@@ -356,179 +370,9 @@ function addMessageCommands(parent: Command, program: Command): void {
 		);
 
 	parent
-		.command("read")
-		.description("Read and decrypt a message by ID")
-		.argument("<message-id>", "Message ID")
-		.option("--agent <id>", "Agent ID (for decryption key)")
-		.action(
-			withClient(
-				program,
-				async (
-					{ client, gOpts, configDir, apiUrl },
-					messageId: string,
-					opts: { agent?: string },
-				) => {
-					const data = (await client.get(
-						`/messages/${messageId}`,
-					)) as MessageRead;
-
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
-
-					const canDecrypt =
-						(data.encryption_version === "hpke-v1" ||
-							data.encryption_version === "hpke-hybrid-v1" ||
-							data.encryption_version === "sender-key-v1" ||
-							data.encryption_version === "mls-v1") &&
-						agentKeysExist(configDir, agentId);
-
-					if (canDecrypt) {
-						let decResult:
-							| Awaited<ReturnType<typeof decryptMessage>>
-							| undefined;
-
-						if (
-							(data.encryption_version === "sender-key-v1" ||
-								data.encryption_version === "mls-v1") &&
-							data.group_id
-						) {
-							try {
-								decResult = await decryptGroupMessage(
-									configDir,
-									agentId,
-									data.group_id,
-									data.encrypted_payload,
-									client,
-								);
-							} catch (err) {
-								// Auto-recover: fetch missing sender keys and retry once
-								const match =
-									err instanceof Error &&
-									err.message.match(/^unknown sender key id: (.+)$/);
-								if (match) {
-									const ingested = await fetchAndIngestPendingSKDistributions(
-										client,
-										configDir,
-										agentId,
-										match[1],
-									);
-									if (ingested > 0) {
-										try {
-											decResult = await decryptGroupMessage(
-												configDir,
-												agentId,
-												data.group_id,
-												data.encrypted_payload,
-												client,
-											);
-										} catch (retryErr) {
-											if (!gOpts.json) {
-												printError(
-													`Decryption failed after auto-ingest: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
-												);
-											}
-										}
-									} else if (!gOpts.json) {
-										printError(`Decryption failed: ${err.message}`);
-									}
-								} else if (!gOpts.json) {
-									printError(
-										`Decryption failed: ${err instanceof Error ? err.message : String(err)}`,
-									);
-								}
-							}
-						} else {
-							try {
-								decResult = await decryptMessage(
-									configDir,
-									agentId,
-									data.encrypted_payload,
-									client,
-								);
-							} catch (err) {
-								if (!gOpts.json) {
-									printError(
-										`Decryption failed: ${err instanceof Error ? err.message : String(err)}`,
-									);
-								}
-							}
-						}
-
-						if (decResult) {
-							if (
-								ingestSenderKeyDistribution(
-									configDir,
-									agentId,
-									data.type,
-									decResult,
-								)
-							) {
-								printText("Sender key ingested");
-							}
-
-							if (gOpts.json) {
-								printJson({
-									...data,
-									decrypted_payload: JSON.parse(decResult.plaintext),
-									signature_verified: decResult.verified,
-									verification_status: decResult.verificationStatus,
-									sender_kid: decResult.senderKid,
-								});
-							} else {
-								printTable([
-									{
-										ID: data.id,
-										"Conversation ID": data.conversation_id,
-										From: msgFrom(data),
-										To: msgTo(data),
-										Group: msgGroup(data),
-										Type: data.type,
-										Verified:
-											decResult.verificationStatus === "verified"
-												? "\u2713"
-												: decResult.verificationStatus === "invalid"
-													? "\u2717 INVALID"
-													: "?",
-										Payload: decResult.plaintext.slice(0, 200),
-										Created: data.created_at,
-									},
-								]);
-							}
-							return;
-						}
-					}
-
-					// Fallback: show raw encrypted data
-					if (gOpts.json) {
-						printJson(data);
-					} else {
-						printTable([
-							{
-								ID: data.id,
-								"Conversation ID": data.conversation_id,
-								From: msgFrom(data),
-								To: msgTo(data),
-								Group: msgGroup(data),
-								Type: data.type,
-								Encryption: data.encryption_version,
-								"Encrypted Payload": `${data.encrypted_payload.slice(0, 40)}...`,
-								Created: data.created_at,
-							},
-						]);
-					}
-				},
-			),
-		);
-
-	parent
 		.command("inbox")
 		.description("List inbox messages")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		.addOption(actorOption())
 		.option("--new", "Show only new (undelivered) messages")
 		.option("--delivered", "Show only delivered messages")
 		.option("--read", "Show only read messages")
@@ -538,7 +382,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, apiUrl },
+					{ client, gOpts, actingAgent },
 					opts: {
 						agent?: string;
 						new?: boolean;
@@ -555,13 +399,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 						);
 					}
 
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
-					);
+					const agentId = await actingAgent();
 
 					const params: Record<string, string | number | boolean> = {};
 					if (opts.new) params.status = "new";
@@ -591,6 +429,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.command("reply")
 		.description("Reply to a message (encrypted)")
 		.argument("<message-id>", "Message ID to reply to")
+		.addOption(actorOption("which agent is acting, and replies"))
 		.option("--type <type>", "Message type (defaults to original message type)")
 		.option("--payload <json>", "Reply payload as JSON string")
 		.option(
@@ -601,7 +440,7 @@ function addMessageCommands(parent: Command, program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir, apiUrl },
+					{ client, gOpts, configDir, actingAgent },
 					messageId: string,
 					opts: { type?: string; payload?: string; payloadFile?: string },
 				) => {
@@ -613,18 +452,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 					}
 					const parsedPayload = result.parsed;
 
+					// Resolved BEFORE the fetch (see `ActorLadder.actingAgent`) —
+					// answering a message is also how it gets marked read.
+					const senderAgentId = await actingAgent();
+
 					// Fetch the original message to get the sender (our reply recipient)
 					const original = (await client.get(
 						`/messages/${messageId}`,
 					)) as MessageRead;
-
-					const agents = await fetchAgents(client);
-					const senderAgentId = await resolveAgent(
-						apiUrl,
-						agents,
-						undefined,
-						gOpts.as,
-					);
 
 					if (original.from_agent_id === senderAgentId) {
 						console.error(
@@ -688,39 +523,48 @@ function addMessageCommands(parent: Command, program: Command): void {
 	parent
 		.command("thread")
 		.description(
-			"Show the both-sided, decrypted transcript of a conversation (role-tagged)",
+			"Show the both-sided, decrypted transcript of a conversation or a group (role-tagged)",
 		)
-		.argument("<conversation-id>", "Conversation ID")
-		.option("--agent <id>", "Agent ID (defaults to your agent)")
+		// Optional, and still first: every existing `rine thread <id>` call is
+		// unchanged. A group is named the way every other group verb takes it.
+		.argument("[conversation-id]", "Conversation ID")
+		.option("--group <ref>", GROUP_REFERENCE_HELP)
+		.addOption(actorOption())
 		.option("--limit <n>", "Max turns to return (most-recent window)")
 		.action(
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir, apiUrl },
-					conversationId: string,
-					opts: { agent?: string; limit?: string },
+					{ client, gOpts, configDir, actingAgent },
+					conversationId: string | undefined,
+					opts: { group?: string; agent?: string; limit?: string },
 				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(
-						apiUrl,
-						agents,
-						opts.agent,
-						gOpts.as,
+					// Both refusals — naming both references or neither, and a
+					// conversation id the wire would not read as a UUID — are decided
+					// in rine-core before a request is spent, and spell the parameters
+					// the way this surface takes them. 🔴 Ordered BEFORE `actingAgent()`,
+					// which fetches this org's agents: a refusal advertised as costing
+					// nothing must actually cost nothing. `rine-mcp` orders it the same
+					// way (`src/tools/messaging-thread.ts`) and says so there too.
+					const ref = resolveThreadRef(
+						{ group: opts.group, conversationId },
+						THREAD_REF_SURFACES.cli,
 					);
+					const agentId = await actingAgent();
+					const data = await readThreadPage(client, ref, {
+						...(opts.limit ? { limit: opts.limit } : {}),
+						extraHeaders: { [ACTING_AGENT_HEADER]: agentId },
+					});
 
-					const params: Record<string, string | number> = {};
-					if (opts.limit) params.limit = opts.limit;
-					const data = (await client.get(
-						`/conversations/${conversationId}/messages`,
-						params,
-						{ "X-Rine-Agent": agentId },
-					)) as { messages: ThreadRow[]; truncated?: boolean };
-
-					const entries = await Promise.all(
-						(data.messages ?? []).map((row) =>
-							decryptThreadRow(configDir, agentId, row, client),
-						),
+					// The plural call is the render boundary: it decrypts the rows
+					// concurrently exactly as before, and owns the one decision this
+					// map could not — a transcript of unopenable group messages says
+					// why once, then marks, instead of repeating a paragraph per row.
+					const entries = await decryptThreadRows(
+						configDir,
+						agentId,
+						data.messages ?? [],
+						client,
 					);
 
 					if (gOpts.json) {

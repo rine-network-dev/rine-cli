@@ -1,28 +1,26 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import {
-	fetchAgents,
 	loadCredentials,
-	resolveAgent,
 	saveCredentials,
 } from "@rine-network/core";
-import { printError, printJson, printMutationOk } from "../output.js";
+import {  printJson, printMutationOk } from "../output.js";
 
 export function registerPollToken(program: Command): void {
 	program
 		.command("poll-token")
 		.description("Generate or revoke a poll token for inbox monitoring")
-		.option("--agent <id>", "Agent ID (auto-resolved for single-agent orgs)")
+		.addOption(actorOption())
 		.option("--revoke", "Revoke the poll token")
 		.action(
 			withClient(
 				program,
 				async (
-					{ client, gOpts, profileName, configDir, apiUrl },
+					{ client, gOpts, profileName, configDir, actingAgent },
 					opts: { agent?: string; revoke?: boolean },
 				) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+					const agentId = await actingAgent();
 
 					if (opts.revoke) {
 						await client.delete(`/agents/${agentId}/poll-token`);

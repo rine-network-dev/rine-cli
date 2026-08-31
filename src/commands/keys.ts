@@ -2,20 +2,17 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Command } from "commander";
 import { withClient, withErrorHandler } from "../action.js";
+import { actorOption } from "../actor.js";
 import {
 	type AgentKeys,
 	type AgentKeysResponse,
-	type AgentRead,
-	type ListResponse,
 	RineApiError,
 	agentKeysExist,
-	fetchAgents,
 	fromBase64Url,
 	generateAgentKeys,
 	generatePqKeyPair,
 	getAgentPublicKeys,
 	loadAgentKeys,
-	resolveAgent,
 	resolveConfigDir,
 	saveAgentKeys,
 	savePqEncryptionKey,
@@ -86,16 +83,15 @@ export function registerKeys(program: Command): void {
 	keys
 		.command("status")
 		.description("Show E2EE key status for an agent")
-		.option("--agent <id>", "Agent ID")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir,  actingAgent, agents }) => {
+					const agentId = await actingAgent();
 
 					// Find handle from agent list
-					const agent = agents.find((a) => a.id === agentId);
+					const agent = (await agents()).find((a) => a.id === agentId);
 					const handle = agent?.handle ?? "unknown";
 
 					const hasLocal = agentKeysExist(configDir, agentId);
@@ -187,13 +183,12 @@ export function registerKeys(program: Command): void {
 	keys
 		.command("generate")
 		.description("Generate new E2EE keys for an agent")
-		.option("--agent <id>", "Agent ID")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir,  actingAgent }) => {
+					const agentId = await actingAgent();
 
 					if (agentKeysExist(configDir, agentId)) {
 						printError(
@@ -220,13 +215,12 @@ export function registerKeys(program: Command): void {
 	keys
 		.command("rotate")
 		.description("Rotate E2EE keys for an agent")
-		.option("--agent <id>", "Agent ID")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir,  actingAgent }) => {
+					const agentId = await actingAgent();
 
 					if (agentKeysExist(configDir, agentId)) {
 						backupKeys(configDir, agentId);
@@ -246,13 +240,12 @@ export function registerKeys(program: Command): void {
 	keys
 		.command("add-pq")
 		.description("Add a post-quantum encryption key without rotating other keys")
-		.option("--agent <id>", "Agent ID")
+		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+				async ({ client, gOpts, configDir,  actingAgent }) => {
+					const agentId = await actingAgent();
 
 					if (!agentKeysExist(configDir, agentId)) {
 						printError(
@@ -291,14 +284,13 @@ export function registerKeys(program: Command): void {
 	keys
 		.command("export")
 		.description("Export private keys to a file")
-		.option("--agent <id>", "Agent ID")
+		.addOption(actorOption())
 		.requiredOption("--output <file>", "Output file path")
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir, apiUrl }, opts: { agent?: string; output: string }) => {
-					const agents = await fetchAgents(client);
-					const agentId = await resolveAgent(apiUrl, agents, opts.agent, gOpts.as);
+				async ({  gOpts, configDir,  actingAgent }, opts: { agent?: string; output: string }) => {
+					const agentId = await actingAgent();
 
 					if (!agentKeysExist(configDir, agentId)) {
 						printError(`No keys found for agent ${agentId}`);

@@ -29,7 +29,7 @@ const BASE_ARGS = [
 	"Test Org",
 	"--slug",
 	"test-org",
-	"--agent",
+	"--agent-name",
 	"my-agent",
 ];
 
@@ -58,8 +58,23 @@ const MOCK_AGENTS_LIST: core.ListResponse<core.AgentRead> = {
 	total: 1,
 };
 
-function makeProgram(globalOpts: Record<string, unknown> = {}): Command {
+/**
+ * An onboard program wired the way `main.ts` wires one.
+ *
+ * `refusing` makes Commander throw its refusals instead of exiting the test
+ * runner, and silences the usage text it would otherwise write to stderr — the
+ * only difference between a run that is expected to work and one that is
+ * expected to be turned away.
+ */
+function makeProgram(
+	globalOpts: Record<string, unknown> = {},
+	{ refusing = false }: { refusing?: boolean } = {},
+): Command {
 	const program = new Command();
+	if (refusing) {
+		program.exitOverride();
+		program.configureOutput({ writeErr: () => {} });
+	}
 	program.option("--json", "Output JSON");
 	program.option("--profile <profile>", "Profile name");
 	vi.spyOn(program, "opts").mockReturnValue(globalOpts);
@@ -88,6 +103,58 @@ describe("onboard command — invalid slug", () => {
 			expect.stringContaining("Invalid slug"),
 		);
 		expect(process.exitCode).toBe(1);
+		expect(performRegistrationSpy).not.toHaveBeenCalled();
+	});
+});
+
+// `--agent` named the agent being created, never an agent reference.
+// It is now `--agent-name`, and the old spelling is accepted by nothing: an
+// onboard run from a stale script stops before it registers an org.
+describe("onboard command — the retired --agent spelling is gone", () => {
+	beforeEach(() => {
+		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
+		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
+		vi.spyOn(core, "validateSlug").mockReturnValue(true);
+		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
+	});
+
+	const refusingProgram = () => makeProgram({}, { refusing: true });
+
+	// Commander checks its mandatory options before it reports an unknown one,
+	// so a run that gives `--agent` and nothing else surfaces the stale spelling
+	// as the missing new one — which is the sentence that tells the caller what
+	// to type. Either way nothing is registered.
+	it("refuses --agent by naming --agent-name, before any registration", async () => {
+		const performRegistrationSpy = vi
+			.spyOn(core, "performRegistration")
+			.mockResolvedValue(MOCK_REG_RESULT);
+
+		await expect(
+			refusingProgram().parseAsync([
+				"node",
+				"rine",
+				"onboard",
+				"--email",
+				"test@example.com",
+				"--name",
+				"Test Org",
+				"--slug",
+				"test-org",
+				"--agent",
+				"my-agent",
+			]),
+		).rejects.toThrow(/required option '--agent-name/);
+		expect(performRegistrationSpy).not.toHaveBeenCalled();
+	});
+
+	it("still refuses --agent when --agent-name is also given", async () => {
+		const performRegistrationSpy = vi
+			.spyOn(core, "performRegistration")
+			.mockResolvedValue(MOCK_REG_RESULT);
+
+		await expect(
+			refusingProgram().parseAsync([...BASE_ARGS, "--agent", "my-agent"]),
+		).rejects.toThrow(/unknown option '--agent'/);
 		expect(performRegistrationSpy).not.toHaveBeenCalled();
 	});
 });
@@ -193,7 +260,7 @@ describe("onboard command — happy path (text mode)", () => {
 		vi.spyOn(agentFormatModule, "toAgentRow").mockReturnValue({
 			ID: MOCK_AGENT.id,
 			Name: MOCK_AGENT.name,
-			Handle: MOCK_AGENT.handle,
+			Handle: MOCK_AGENT.handle ?? MOCK_AGENT.id,
 			"Human Oversight": "true",
 			Created: MOCK_AGENT.created_at,
 		});
@@ -215,7 +282,7 @@ describe("onboard command — happy path (text mode)", () => {
 		vi.spyOn(agentFormatModule, "toAgentRow").mockReturnValue({
 			ID: MOCK_AGENT.id,
 			Name: MOCK_AGENT.name,
-			Handle: MOCK_AGENT.handle,
+			Handle: MOCK_AGENT.handle ?? MOCK_AGENT.id,
 			"Human Oversight": "true",
 			Created: MOCK_AGENT.created_at,
 		});
@@ -235,7 +302,7 @@ describe("onboard command — happy path (text mode)", () => {
 		const agentRow = {
 			ID: MOCK_AGENT.id,
 			Name: MOCK_AGENT.name,
-			Handle: MOCK_AGENT.handle,
+			Handle: MOCK_AGENT.handle ?? MOCK_AGENT.id,
 			"Human Oversight": "true",
 			Created: MOCK_AGENT.created_at,
 		};
@@ -249,7 +316,13 @@ describe("onboard command — happy path (text mode)", () => {
 
 		expect(agentFormatModule.toAgentRow).toHaveBeenCalledWith(
 			MOCK_AGENT,
-			expect.objectContaining({ includeCard: true, includeVerificationWords: true }),
+			expect.objectContaining({
+				includeCard: true,
+				// The row is handed the COMPARISON, never a "print the words"
+				// flag — a surface with no local key cannot reach a state where
+				// it prints the server's string as its own.
+				verification: expect.objectContaining({ status: "not-computed" }),
+			}),
 		);
 		expect(printTableSpy).toHaveBeenCalledWith([agentRow]);
 	});
@@ -286,6 +359,17 @@ describe("onboard command — happy path (JSON mode)", () => {
 			org_id: MOCK_REG_RESULT.org_id,
 			client_id: MOCK_REG_RESULT.client_id,
 			agent: MOCK_AGENT,
+			// The comparison ships as its own field, both values and a
+			// boolean, beside the agent rather than folded into it. This config
+			// dir holds no key for the mocked agent, so it is `not-computed` —
+			// which is exactly the state a surface must not print as if it had
+			// recomputed anything.
+			verification: {
+				status: "not-computed",
+				computed: null,
+				asserted: MOCK_AGENT.verification_words,
+				match: null,
+			},
 			poll_url: MOCK_AGENT.poll_url,
 			identity: undefined,
 			config_dir: "/tmp/test-rine",

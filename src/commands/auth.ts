@@ -1,20 +1,18 @@
 import type { Command } from "commander";
 import { withClient, withErrorHandler } from "../action.js";
+import { actorLadder } from "../acting-agent.js";
+import { namedActor } from "../actor.js";
 import {
-	type AgentRead,
-	type ListResponse,
 	type OrgRead,
 	HttpClient,
 	agentKeysExist,
 	cacheToken,
-	fetchAgents,
 	fetchOAuthToken,
 	formatError,
 	getCredentialEntry,
 	getOrRefreshToken,
 	loadCredentials,
 	loadTokenCache,
-	resolveAgent,
 	resolveApiUrl,
 	resolveConfigDir,
 	saveCredentials,
@@ -113,6 +111,11 @@ export function registerAuth(program: Command): void {
 					canRefresh: false,
 					defaultHeaders,
 				});
+				const { agents, actingAgent } = actorLadder(
+					namedActor(undefined, gOpts),
+					client,
+					defaultHeaders,
+				);
 
 				const org = (await client.get("/org")) as OrgRead;
 
@@ -122,10 +125,9 @@ export function registerAuth(program: Command): void {
 				let keysLabel: string | undefined;
 
 				try {
-					const agents = await fetchAgents(client);
-					agentId = await resolveAgent(apiUrl, agents, undefined, gOpts.as);
-					const agent = agents.find((a) => a.id === agentId);
-					agentHandle = agent?.handle;
+					agentId = await actingAgent();
+					const agent = (await agents()).find((a) => a.id === agentId);
+					agentHandle = agent?.handle ?? undefined;
 
 					const hasLocal = agentKeysExist(configDir, agentId);
 					let hasServer = false;

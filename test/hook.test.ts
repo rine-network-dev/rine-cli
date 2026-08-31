@@ -63,7 +63,7 @@ beforeEach(() => {
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, name: "bot" },
 	] as never);
-	vi.spyOn(core, "resolveAgent").mockResolvedValue(AGENT_ID);
+	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: AGENT_ID });
 });
 
 afterEach(() => {
