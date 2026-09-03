@@ -175,3 +175,123 @@ describe("read command — a group message whose sender key never arrived", () =
 		expect(said).toContain("503: upstream unavailable");
 	});
 });
+
+describe("read command — a group message this agent holds no MLS key for", () => {
+	/** What mls-rs raises when there is no epoch secret to derive from. */
+	function kdfRefusal(): Error {
+		return Object.assign(
+			new Error(
+				"the provided length of the key 0 is shorter than the minimum length 32",
+			),
+			{ code: core.MLS_ERR_PROTOCOL },
+		);
+	}
+
+	it("never prints the crypto library's own words", async () => {
+		// The measured defect: an agent a carried vote seated with no Welcome has
+		// no leaf, so the KDF refuses a zero-length secret — and `read` printed
+		// that refusal verbatim while `thread` rendered the same message, at the
+		// same moment, as `[unavailable]`.
+		recoveryEndsIn(kdfRefusal());
+
+		const said = await readAndCollectStderr();
+
+		expect(said).not.toContain("the provided length of the key");
+		expect(said).toContain("holds no MLS key for group");
+		expect(said).toContain(GROUP_ID);
+	});
+
+	it("names a remedy the CLI can actually perform", async () => {
+		// `rine group sync` is the only verb that republishes key packages, and
+		// only since the top-up folded into it. Nothing else in the CLI does, so
+		// no other verb may be named here.
+		recoveryEndsIn(kdfRefusal());
+
+		const said = await readAndCollectStderr();
+
+		expect(said).toContain(`rine group sync ${GROUP_ID}`);
+	});
+
+	it("degrades the row the way `thread` does instead of dumping ciphertext", async () => {
+		// The other half of the same finding. A refused read printed the first 40
+		// characters of base64 in a column called "Encrypted Payload" — nothing a
+		// reader can act on, and the one renderer of an unopened message that did
+		// not use the sentinel every other surface uses.
+		recoveryEndsIn(kdfRefusal());
+		vi.spyOn(outputModule, "printError").mockImplementation(() => {});
+		const printTableSpy = vi
+			.spyOn(outputModule, "printTable")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(["node", "rine", "read", MESSAGE_ID]);
+
+		const rows = printTableSpy.mock.calls.at(-1)?.[0] as Record<
+			string,
+			unknown
+		>[];
+		const row = rows[0];
+		// A refused read still renders exactly one row, and asserting on nothing
+		// is how a renderer that stopped printing altogether would read green.
+		if (row === undefined) throw new Error("the refused read printed no row");
+		expect(row.Payload).toBe(core.THREAD_UNAVAILABLE);
+		expect(row.Verified).toBe("?");
+		expect(row).not.toHaveProperty("Encrypted Payload");
+		expect(JSON.stringify(row)).not.toContain(
+			GROUP_MESSAGE.encrypted_payload.slice(0, 10),
+		);
+	});
+
+	it("still hands a --json caller the ciphertext it stopped printing", async () => {
+		// The rendering changed; the envelope did not. A program reading `--json`
+		// loses nothing, which is what makes dropping the column from the human
+		// table a presentation decision rather than a removal.
+		recoveryEndsIn(kdfRefusal());
+		const printJsonSpy = vi
+			.spyOn(outputModule, "printJson")
+			.mockImplementation(() => {});
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync(["node", "rine", "read", MESSAGE_ID]);
+
+		const out = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+		expect(out.encrypted_payload).toBe(GROUP_MESSAGE.encrypted_payload);
+		expect(String(out.decrypt_error)).toContain("holds no MLS key for group");
+		expect(String(out.decrypt_error)).not.toContain(
+			"the provided length of the key",
+		);
+	});
+
+	it("keeps rine's own words for a failure a sync cannot mend", async () => {
+		// A local store failure is this process's problem, not a missing leaf, and
+		// `isRecoverableMlsRead` answers false for it — so it must not be told to
+		// run a sync. It keeps the sentence it arrived with.
+		recoveryEndsIn(
+			Object.assign(new Error("cannot write the local MLS store"), {
+				code: core.MLS_ERR_STORE,
+			}),
+		);
+
+		const said = await readAndCollectStderr();
+
+		expect(said).toContain("cannot write the local MLS store");
+		expect(said).not.toContain("rine group sync");
+	});
+
+	it("says the eviction as a membership fact, not as a protocol error", async () => {
+		// The one MLS invariant rine already had words for. It reaches this path
+		// through the same translator the group commands use, so the CLI cannot
+		// come to say two different things about one eviction.
+		recoveryEndsIn(
+			Object.assign(new Error("this member was removed at epoch 47"), {
+				code: core.MLS_ERR_GROUP_INACTIVE,
+			}),
+		);
+
+		const said = await readAndCollectStderr();
+
+		expect(said).toContain(`You were removed from group ${GROUP_ID}`);
+		expect(said).not.toContain("epoch 47");
+	});
+});
+

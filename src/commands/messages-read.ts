@@ -118,35 +118,29 @@ export function addReadCommand(parent: Command, program: Command): void {
 									printError(MLS_EVICTED_BY_COMMIT);
 								}
 								printTable([
-									{
-										ID: data.id,
-										"Conversation ID": data.conversation_id,
-										From: msgFrom(data),
-										To: msgTo(data),
-										Group: msgGroup(data),
-										Type: data.type,
-										Verified: verifiedMark(decResult.verificationStatus),
+									openedRow(
+										data,
+										verifiedMark(decResult.verificationStatus),
 										// A row that opened and withheld its content — an
 										// authenticity refusal, which has no remedy to name and keeps
 										// the sentinel every surface renders for it. A missing sender
 										// key never reaches this cell: it leaves no result at all and
-										// falls through to the raw table below.
-										Payload:
-											decResult.plaintext?.slice(0, 200) ?? THREAD_UNAVAILABLE,
-										Created: data.created_at,
-									},
+										// falls through to the refused table below.
+										decResult.plaintext?.slice(0, 200) ?? THREAD_UNAVAILABLE,
+									),
 								]);
 							}
 							return;
 						}
 					}
 
-					// Fallback: show raw encrypted data
 					if (gOpts.json) {
 						// Why it stayed closed is a fact about this read, and a `--json`
 						// caller could not learn it at all before — the reason went to stderr
 						// as prose, or nowhere. `decrypt_error_code` is the same field, under
-						// the same name, that both SDKs carry.
+						// the same name, that both SDKs carry. The envelope carries
+						// `encrypted_payload` in full, so a program loses nothing the
+						// human rendering below stopped printing.
 						printJson({
 							...data,
 							...(refusal !== null
@@ -156,15 +150,23 @@ export function addReadCommand(parent: Command, program: Command): void {
 									}
 								: {}),
 						});
+					} else if (refusal !== null) {
+						// A read that was attempted and refused, rendered in `thread`'s
+						// vocabulary rather than as a ciphertext dump: the sentinel every
+						// surface prints for content it could not show, and `?` for a
+						// signature nothing ever got as far as checking. The reason itself
+						// went to stderr above, so the row does not repeat it — and 40
+						// characters of base64 was never something a reader could act on.
+						printTable([
+							openedRow(data, verifiedMark("unverifiable"), THREAD_UNAVAILABLE),
+						]);
 					} else {
+						// No decrypt was attempted at all — no keys, no authenticated
+						// sender, or an encryption this build does not open. Nothing is
+						// withheld, so the row is what arrived.
 						printTable([
 							{
-								ID: data.id,
-								"Conversation ID": data.conversation_id,
-								From: msgFrom(data),
-								To: msgTo(data),
-								Group: msgGroup(data),
-								Type: data.type,
+								...readRow(data),
 								Encryption: data.encryption_version,
 								"Encrypted Payload": `${data.encrypted_payload.slice(0, 40)}...`,
 								Created: data.created_at,
@@ -174,4 +176,34 @@ export function addReadCommand(parent: Command, program: Command): void {
 				},
 			),
 		);
+}
+
+/** The columns every rendering of one read shares, in one order. */
+function readRow(data: MessageRead): Record<string, unknown> {
+	return {
+		ID: data.id,
+		"Conversation ID": data.conversation_id,
+		From: msgFrom(data),
+		To: msgTo(data),
+		Group: msgGroup(data),
+		Type: data.type,
+	};
+}
+
+/**
+ * One row for a message this read tried to open — whether it opened, withheld
+ * its content or would not open at all. One shape for all three, so a refused
+ * read and a successful one are read off the same columns.
+ */
+function openedRow(
+	data: MessageRead,
+	verified: string,
+	payload: string,
+): Record<string, unknown> {
+	return {
+		...readRow(data),
+		Verified: verified,
+		Payload: payload,
+		Created: data.created_at,
+	};
 }

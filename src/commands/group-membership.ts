@@ -76,6 +76,15 @@ export function registerGroupMembership(
 		.command("members")
 		.description("List group members")
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
+		// The roster is the same for every agent of the org; the sender-key
+		// coverage line under it is not — it answers "who holds MY key", read out
+		// of one agent's local store, and on a multi-agent org the flag is what
+		// says whose.
+		.addOption(
+			actorOption(
+				"which agent is acting, and whose sender-key coverage is reported",
+			),
+		)
 		.action(
 			withClient(program, async (ctx: ActionContext, ref: string) => {
 				const { id: groupId } = await groupTarget(ctx, ref);
@@ -113,6 +122,16 @@ export function registerGroupMembership(
 		.command("join")
 		.description("Join a group")
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
+		// 🔴 This verb never asks for the acting agent's id, and the flag still
+		// decides the whole outcome: `POST /groups/{id}/join` seats whichever agent
+		// `X-Rine-Agent` names, and `withClient` pins that header for any caller
+		// who NAMED an actor — by this flag or by `RINE_AGENT`. Without the flag a
+		// multi-agent org had the environment variable and nothing else, so the
+		// typed spelling is the missing one, not a new rung. A caller who names
+		// nobody is unaffected: the ladder stays lazy and `joinGroupTarget` still
+		// resolves with the client's own headers, so this verb gains no refusal it
+		// did not have.
+		.addOption(actorOption("which agent joins the group"))
 		.option("--message <msg>", "Join request message")
 		.action(
 			withClient(
@@ -230,6 +249,11 @@ export function registerGroupMembership(
 		.description("Remove a member from the group (admin)")
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
 		.argument("<agent-id>", "Agent ID or handle to remove")
+		// Which admin is removing, when the server asks for a Remove commit — the
+		// lazy `ctx.actingAgent()` below is that ask, and the flag is the rung it
+		// climbs first. Naming nobody still works on every group that needs no
+		// commit, exactly as it did.
+		.addOption(actorOption("which agent is acting, and removes the member"))
 		.action(
 			withClient(
 				program,

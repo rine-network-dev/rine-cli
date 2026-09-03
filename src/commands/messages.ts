@@ -17,12 +17,14 @@ import {
 	isNoMlsStateError,
 	normalizeHandle,
 	processMlsWelcomes,
+	readableGroupById,
 	readThreadPage,
 	resolveGroupByHandle,
 	resolveThreadRef,
 	resolveToUuid,
 	syncMlsGroup,
 	THREAD_REF_SURFACES,
+	UUID_RE,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { withClient } from "../action.js";
@@ -70,6 +72,27 @@ function resolvePayload(
 	} catch {
 		return { error: "Payload must be valid JSON" };
 	}
+}
+
+/**
+ * What a caller is told when the ID they typed named a group, not an agent.
+ *
+ * 🔴 It quotes the caller's own spelling and the handle the wire will carry,
+ * and nothing else. A third handle would be a placeholder in a sentence about
+ * a real send, and an `@org` slot for the caller to fill would advertise a
+ * spelling this notice is not about.
+ *
+ * 🔴 It stays on this surface rather than moving into `@rine-network/core`,
+ * for `GROUP_REFERENCE_HELP`'s reason (`group-target.ts`): a constant in the
+ * shared package is a constant the Python stack is then expected to twin and a
+ * gate is expected to hold, and this is one CLI's rendering of a substitution
+ * the shared door discharges through its RETURN VALUE — `RecipientTarget`
+ * carries `spelling` beside `handle` so every other surface can compare the
+ * two and say it in its own idiom. Hoisting it would mint an obligation
+ * nothing pays.
+ */
+function groupIdRecipientNote(spelling: string, handle: string): string {
+	return `Note: '${spelling}' is a group ID, so this was addressed to the group '${handle}' and not to an agent.`;
 }
 
 // MLS group send: always sync to the latest epoch before encrypting so that
@@ -143,7 +166,16 @@ function addMessageCommands(parent: Command, program: Command): void {
 			// `#logistics`, and advertises and resolves NEITHER a bare `logistics`
 			// as a group. A later migration will be tempted to erase the second
 			// half; it is a decision nobody has taken, not an omission.
-			"Recipient: an agent handle (kofi@acme.rine.network), an agent ID, or a group — by handle (#logistics@acme.rine.network) or by sigiled name (#logistics)",
+			//
+			// 🔴 A group's own ID is the third group spelling this slot takes,
+			// and advertising it is the same ratified rule the sigiled
+			// form arrived under: a spelling this CLI accepts is either
+			// advertised here or announced when it rewrites what the caller
+			// typed. This one is both. The two worked examples stay — the
+			// placeholder ban is a rule about REFUSALS, and stripping them
+			// while widening the sentence would trade one item's fix for
+			// another item's regression with nothing going red.
+			"Recipient: an agent handle (kofi@acme.rine.network), an agent ID, or a group — by handle (#logistics@acme.rine.network), by sigiled name (#logistics), or by the group's own ID",
 		)
 		.option("--type <type>", "Message type (default: rine.v1.dm)")
 		.option("--payload <json>", "Message payload as JSON string")
@@ -211,7 +243,45 @@ function addMessageCommands(parent: Command, program: Command): void {
 					// to_handle, not both") — after the message has been sealed.
 					// The bare-name rule is untouched: a BARE `logistics`, no sigil, is still an
 					// agent on this surface and still resolves as one.
-					const isGroupSend = to.startsWith("#");
+					//
+					// 🔴 The second thing that decides it is a READ, and it is the
+					// only spelling on this surface that spends one to be classified.
+					// An ID names an entity, not a namespace, so the
+					// namespaces are asked in the order their SCOPES rank:
+					// `GET /groups/{id}` answers only for a group this caller's org
+					// owns or is seated in, while `GET /agents/{id}/keys` is
+					// unauthenticated and global — asking the agent side first would
+					// prefer a stranger's namespace over the caller's own org's.
+					//
+					// 🔴 `readableGroupById` and never a hand-rolled read of the same
+					// route: it is the one place that turns a 404 and a 403 into the
+					// same miss and refuses a body naming a group nobody asked about.
+					// And never `groupTarget`/`resolveGroup`, which buy the roster and
+					// THROW on a miss — a throw here would refuse every agent ID.
+					//
+					// 🔴 This is a UUID-ONLY rung, deliberately not a migration onto
+					// `resolveRecipient`. That door reads a BARE word as a group, and
+					// this surface reads it as an agent; routing `send` through it
+					// would silently turn `--to logistics` into a group send, and
+					// nothing in `rine-core` would go red for it.
+					const groupNamedById = UUID_RE.test(to)
+						? await readableGroupById(client, to)
+						: undefined;
+					const isGroupSend =
+						to.startsWith("#") || groupNamedById !== undefined;
+
+					// 🔴 No silent acceptance. An ID resolved in the group namespace
+					// is a rewrite of what the caller typed — the wire carries a
+					// handle they never wrote — and stdout carries only the send
+					// result, so the notice goes to stderr and is NOT gated on
+					// `--json`: a machine reader is the caller a silent rewrite harms
+					// most, and stdout stays byte-for-byte parseable because the
+					// notice was never on it.
+					if (groupNamedById !== undefined) {
+						printError(
+							groupIdRecipientNote(opts.to, groupNamedById.handle),
+						);
+					}
 
 					// Resolve recipient ID for key fetch. A group has no recipient
 					// agent — its key comes from the group, not from an agent row.
@@ -280,11 +350,15 @@ function addMessageCommands(parent: Command, program: Command): void {
 						// roster refusal from `rine send`, on the same spelling of the
 						// same group. The acting agent is already resolved above, so the
 						// gate costs no round trip here at all.
-						const group = await resolveGroupByHandle(client, to).catch(
-							async (err): Promise<never> => {
-								throw await withEvictionPointerIfHeld(ctx, err);
-							},
-						);
+						// The ID rung above already holds the row it read, so the
+						// handle lookup runs only for the two sigiled spellings.
+						const group =
+							groupNamedById ??
+							(await resolveGroupByHandle(client, to).catch(
+								async (err): Promise<never> => {
+									throw await withEvictionPointerIfHeld(ctx, err);
+								},
+							));
 						// 🔴 The wire carries the group the SERVER holds, never the
 						// spelling that was typed. `POST /messages` looks `to_handle`
 						// up by exact equality, and the handle fallback exists precisely
@@ -305,8 +379,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 						assertNoMlsDowngrade(configDir, senderAgentId, group.id, mlsOnly);
 
 						if (mlsOnly) {
+							// The group's own handle, never `to`: the parameter is named
+							// `groupHandle` and the rungs above accept spellings that are
+							// not one — a UUID, a sigiled short form, an org half that
+							// does not match. Echoing what was typed made one event read
+							// two ways and, on the UUID rung, named an identifier one line
+							// under the note that had just resolved it away.
 							if (group.mls_group_id == null)
-								throw new MlsInitInFlightError(to);
+								throw new MlsInitInFlightError(group.handle);
 							// MLS-active group: use MLS encryption (keyed by rine group UUID)
 							const encResult = await encryptMlsWithRecovery(
 								client,

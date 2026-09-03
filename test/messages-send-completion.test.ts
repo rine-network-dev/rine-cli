@@ -69,6 +69,14 @@ beforeEach(() => {
 		encryption_version: "hpke-v1",
 		sender_signing_kid: `rine:${SENDER}`,
 	} as never);
+	// 🔴 `send --to <uuid>` asks the group namespace before the agent one,
+	// so a suite that sends to a UUID has to answer that read or the probe
+	// reaches the network. `RECIPIENT` names an agent, so the group route is a
+	// 404 — the miss that hands the spelling to the agent arm, which is the
+	// path this file is actually about.
+	vi.spyOn(core.HttpClient.prototype, "get").mockRejectedValue(
+		new core.RineApiError(404, "Group not found"),
+	);
 	vi.spyOn(core.HttpClient.prototype, "post").mockImplementation(
 		async (path: string, body?: unknown) => {
 			posts.push([path, body]);

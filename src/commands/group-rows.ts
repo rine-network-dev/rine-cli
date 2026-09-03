@@ -169,7 +169,7 @@ export function groupDetailRow(
  * would make `Members` disagree with the table under it.
  *
  * An em dash is a server that does not report the field at all, on the same
- * distinction {@link denialCell} draws: "not yours" and "this build cannot tell
+ * distinction {@link barCell} draws: "not yours" and "this build cannot tell
  * you" are different facts, and printing `false` for the second would state
  * something about another org's seat that nothing here knows.
  */
@@ -236,21 +236,45 @@ export function voteEligibilityClause(r: JoinRequestRead): string {
 }
 
 /**
- * How the denial bar stands, in one cell: denials cast, and how many more would
- * refuse the request.
+ * How one bar of a vote stands, in one cell: votes cast, of the votes that bar
+ * takes.
  *
- * Both bars come from the same electorate, so this one falls as members leave in
- * exactly the way the approval bar does — a standing denial can refuse a request
- * nobody has voted on since. A number the server did not report is an em dash
- * and never a zero: "no more denials are needed" and "this server does not
- * report the denial bar" are different facts, and printing `0` for the second
- * would tell an operator the request is one denial from refusal.
+ * 🔴 The wire carries a SHORTFALL — `approvals_needed` and `denials_needed` are
+ * both "how many MORE it takes" — and this cell prints a THRESHOLD, which is the
+ * shortfall added back onto what has been cast. The two are the same number only
+ * while nothing has been cast, which is why `0 of 2` was right and `1 of 1` was
+ * not: a bar rendered as cast-of-shortfall reads as met on every row somebody
+ * has already voted on. The arithmetic is the server's and is correct; the
+ * addition here is a rendering of it, not a second opinion about it.
+ *
+ * Both bars come from the same electorate, so each falls as members leave in
+ * exactly the way the other does — a standing denial can refuse a request nobody
+ * has voted on since, and a departure can carry one nobody has approved since.
+ * That is also the one state where the threshold this prints sits UNDER what the
+ * required count was when the vote opened, and printing it is the honest answer:
+ * the bar as it stands now is the bar the next vote is measured against.
+ *
+ * A number the server did not report is an em dash and never a zero: "no more
+ * votes are needed" and "this server does not report this bar" are different
+ * facts, and printing `0` for the second would tell an operator the request is
+ * one vote from resolving. A threshold cannot be known from half the pair, so an
+ * unreported shortfall takes the dash on the right of the `of`, and an
+ * unreported cast count takes it on both.
+ *
+ * 🔴 A shortfall of **zero** is the one case the addition cannot resolve, and it
+ * is reachable: the server clamps at zero (`max(required - cast, 0)`,
+ * `src/rine/api/group_vote_math.py`), so a request whose electorate shrank below
+ * what it already holds reports `needed = 0` while still pending — nothing votes
+ * again, so nothing resolves it. Adding gives `cast`, and printing that would
+ * state a bar of 3 on a request whose bar is 2: the one number an operator
+ * quotes, wrong, with the meaning ("met") still right. What the shortfall proves
+ * is an upper bound and not a value, so the cell says exactly that much.
  */
-function denialCell(r: JoinRequestRead): string {
-	const denials = r.denials ?? null;
-	const needed = r.denials_needed ?? null;
-	if (denials === null && needed === null) return "—";
-	return `${denials ?? "—"} of ${needed ?? "—"}`;
+function barCell(cast: number | null, needed: number | null): string {
+	if (cast === null && needed === null) return "—";
+	if (cast !== null && needed === 0) return `${cast} of ${cast} or fewer`;
+	const required = cast === null || needed === null ? null : cast + needed;
+	return `${cast ?? "—"} of ${required ?? "—"}`;
 }
 
 /**
@@ -258,16 +282,30 @@ function denialCell(r: JoinRequestRead): string {
  * call: approvals that count, how many more each bar wants, and how many
  * eligible voters are still in the group.
  *
- * The counts are null on an invitation, which nobody votes on, so that whole
- * clause renders blank there. `Needed` is an em dash when no bar is reachable —
- * everyone eligible has left, and the request stands until it expires.
- * `Denials` reports the other direction the same way, as one cell
- * rather than a second `Denied`/`Deny Needed` pair, because eleven columns is
- * what a terminal shows and twelve is not.
+ * 🔴 `Approved` and `Denials` are ONE convention, read together: each is
+ * {@link barCell}'s cast-of-threshold. They were two, and side by side the pair
+ * `Approved 1 | Needed 1` read as "one of one, carried" on a request that was
+ * still open — the approval bar printed its shortfall in a column of its own
+ * while the denial bar printed a cell. Neither number was wrong; the two
+ * spellings of the same fact were. `Needed` stays beside `Approved` as the
+ * shortfall it always was — how many more calls resolve this — and now says the
+ * same thing as the cell to its left rather than a different-looking one.
+ *
+ * The counts are null on an invitation, which nobody votes on, so `Approved`,
+ * `Needed` and `Eligible` render blank there. `Denials` says `—` instead, on the
+ * distinction {@link barCell} draws: it is the one cell whose emptiness could
+ * otherwise be read as a zero.
+ *
+ * `Needed` is an em dash when no bar is reachable — everyone eligible has left,
+ * and the request stands until it expires — and `Approved` is then `N of —` for
+ * the same reason: what has been cast is known, what it would take is not.
+ * `Denials` reports the other direction as one cell rather than a second
+ * `Denied`/`Deny Needed` pair, because eleven columns is what a terminal shows
+ * and twelve is not.
  *
  * A request a member filed on somebody else's behalf is born carrying that
- * member's own approval, so `Approved: 1` on an untouched row is
- * ordinary here and not a double count.
+ * member's own approval, so `Approved: 1 of 2` on an untouched row is ordinary
+ * here and not a double count.
  */
 export function requestRow(r: JoinRequestRead): Record<string, unknown> {
 	const approvals = r.approvals ?? null;
@@ -275,9 +313,10 @@ export function requestRow(r: JoinRequestRead): Record<string, unknown> {
 		"Request ID": r.id,
 		"Agent ID": r.agent_id,
 		Message: r.message ?? "",
-		Approved: approvals ?? "",
+		Approved:
+			approvals === null ? "" : barCell(approvals, r.approvals_needed ?? null),
 		Needed: approvals === null ? "" : (r.approvals_needed ?? "—"),
-		Denials: denialCell(r),
+		Denials: barCell(r.denials ?? null, r.denials_needed ?? null),
 		Eligible: r.electorate_size ?? "",
 		"Your Vote": r.your_vote ?? "",
 		"Can Vote": voteEligibilityClause(r),

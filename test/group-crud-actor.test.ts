@@ -3,17 +3,20 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
 
-// `rine group update` and `rine group delete` say who is acting.
+// The `rine group` verbs say who is acting.
 //
 // The server resolves an acting agent on PATCH and DELETE `/groups/{id}`, so
-// an org with more than one agent that names nobody is refused. The
-// two commands were the only group verbs with no `--agent`, which left that
-// refusal with no answer on this surface. Every assertion here is on what
-// crossed the wire — the header the request carried — rather than on how the
-// handler got it.
+// an org with more than one agent that names nobody is refused, and `--agent`
+// is this surface's answer to that refusal. It was declared on four verbs of
+// fifteen while the other eleven had `RINE_AGENT` and no typed spelling —
+// including verbs whose whole ANSWER turns on which agent asks. Every
+// assertion here is on what crossed the wire — the header the request carried —
+// rather than on how the handler got it.
 
 const API_URL = "https://test.rine.network";
 const GROUP_ID = "33333333-3333-3333-3333-333333333333";
+/** Where the CLI believes its credentials live — asserted on, so it is named. */
+const CONFIG_DIR = "/tmp/test-rine-group-crud";
 
 function agent(name: string, id: string): core.AgentRead {
 	return {
@@ -72,9 +75,12 @@ function theOnly(method: string): { headers: Record<string, string> } {
 	return first;
 }
 
-function wire(agents: core.AgentRead[]): Command {
+/** What the stubbed server answers a request with, before it is serialised. */
+type Responder = (url: string) => unknown;
+
+function wire(agents: core.AgentRead[], respond: Responder = () => GROUP): Command {
 	requests = [];
-	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine-group-crud");
+	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue(agents);
 	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
@@ -89,7 +95,7 @@ function wire(agents: core.AgentRead[]): Command {
 			headers: (init.headers ?? {}) as Record<string, string>,
 		});
 		return Promise.resolve(
-			new Response(JSON.stringify(GROUP), {
+			new Response(JSON.stringify(respond(String(url))), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			}),
@@ -242,5 +248,123 @@ describe("group update / delete — the acting agent reaches the server", () => 
 
 		expect(groupRequests()).toHaveLength(0);
 		expect(stderr.join("\n")).toContain("You named the acting agent twice");
+	});
+});
+
+// Which agent asks changes what these verbs DO, so each of them has to let the
+// caller say. `RINE_AGENT` always could — `withClient` pins `X-Rine-Agent` for
+// any actor the ladder names, by flag or by environment — so the missing half
+// was the typed spelling, on verbs where a multi-agent org had no way to type
+// it.
+//
+// 🔴 **Which verbs those are is not written down here any more.** A named list
+// of the flag's own declarations is a second copy of them, and the two drift in
+// silence — so the class is walked instead, in
+// `actor-flag-consumed.test.ts`: it collects every command that declares the
+// flag, asserts the set it drives EQUALS that walk, and puts each one on the
+// wire. `list` staying out of the class is asserted there too, beside the walk
+// it constrains. What stays here is the handful of verbs whose consequence is
+// specific enough to be worth naming — a wrong seat, a wrong founder, a queue
+// read answered for the wrong agent.
+describe("group — every verb whose answer depends on the acting agent", () => {
+	// `group requests` asks for no agent id anywhere in its handler, and the
+	// server still resolves the caller through `get_acting_group_member` — that
+	// dependency decides whether the read is allowed and what `Your Vote` and
+	// `Can Vote` say on every row. So the proof has to be the header on the wire:
+	// a flag whose value never leaves the process would be exactly the inert flag
+	// this test exists to rule out.
+	it("puts the agent --agent named on a read that asks for no id", async () => {
+		// The queue read carries `?outstanding=pending`, so both the stub and the
+		// assertion match on the path being CONTAINED — an `endsWith` here answers
+		// every call with a group row and then finds no queue read at all.
+		const program = wire([ALICE, BOB], (url) =>
+			url.includes("/requests") ? { items: [], total: 0 } : GROUP,
+		);
+		await run(program, ["group", "requests", GROUP_ID, "--agent", "bob"]);
+
+		const queue = requests.filter((r) => r.url.includes("/requests"));
+		expect(queue).toHaveLength(1);
+		expect(queue[0] && actorOf(queue[0])).toBe(BOB.id);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	// 🔴 The verb with the worst consequence, and the one a declaration test says
+	// least about: `POST /groups/{id}/join` seats whichever agent `X-Rine-Agent`
+	// names, and on an MLS group that seat is the ratchet-tree leaf. A refactor
+	// that dropped the header here would seat the org's default agent instead,
+	// and the only remedy is orphan reclamation, which is never automatic. The
+	// flag being declared proves nothing about that; the header on the wire does.
+	it("seats the agent --agent names, not the org's first", async () => {
+		const program = wire([ALICE, BOB], (url) =>
+			url.includes("/join")
+				? {
+						id: "44444444-4444-4444-4444-444444444444",
+						group_id: GROUP_ID,
+						agent_id: BOB.id,
+						status: "pending",
+						created_at: "2026-01-01T00:00:00Z",
+					}
+				: GROUP,
+		);
+		await run(program, ["group", "join", GROUP_ID, "--agent", "bob"]);
+
+		const joins = requests.filter((r) => r.url.includes("/join"));
+		expect(joins).toHaveLength(1);
+		expect(joins[0] && actorOf(joins[0])).toBe(BOB.id);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	// 🔴 `join`'s class, one step earlier and with the same remedy — none.
+	// `group create` founds the new group's ratchet tree AS the acting agent
+	// (`foundMlsState`), so a multi-agent org that cannot name one hands the
+	// tree's only leaf to whoever the org's shortcut picks, and getting it back
+	// means reclaiming orphans, which is never automatic. The declaration test
+	// above would pass on a flag nothing reads, so the proof is the header on
+	// `POST /groups` and the agent the founding was actually attempted as.
+	it("founds the group as the agent --agent names, not as the org's first", async () => {
+		const founded = vi.spyOn(core, "initMlsGroup").mockResolvedValue({
+			epoch: 1,
+			commits: 1,
+			added: 0,
+			outcomes: [],
+		});
+		const program = wire([ALICE, BOB]);
+		await run(program, [
+			"group",
+			"create",
+			"--name",
+			"ops",
+			"--visibility",
+			"private",
+			"--agent",
+			"bob",
+		]);
+
+		const creates = requests.filter(
+			(r) => r.method === "POST" && r.url.endsWith("/groups"),
+		);
+		expect(creates).toHaveLength(1);
+		expect(creates[0] && actorOf(creates[0])).toBe(BOB.id);
+		expect(founded).toHaveBeenCalledWith(
+			CONFIG_DIR,
+			BOB.id,
+			GROUP_ID,
+			expect.anything(),
+			{ [core.ACTING_AGENT_HEADER]: BOB.id },
+		);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	// And the verb that is defined by the acting agent: `GET /groups/invites`
+	// answers for one agent and no sibling of it, so "addressed to you" is
+	// whoever this flag names.
+	it("scopes the invites read to the agent --agent named", async () => {
+		const program = wire([ALICE, BOB], () => ({ items: [], total: 0 }));
+		await run(program, ["group", "invites", "--agent", "alice"]);
+
+		const invites = requests.filter((r) => r.url.includes("/groups/invites"));
+		expect(invites).toHaveLength(1);
+		expect(invites[0] && actorOf(invites[0])).toBe(ALICE.id);
+		expect(process.exitCode).toBeUndefined();
 	});
 });

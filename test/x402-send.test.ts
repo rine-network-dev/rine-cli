@@ -68,6 +68,13 @@ describe("rine send — x402 payment_required attaches cleartext extras", () => 
 
 	beforeEach(() => {
 		postBody = undefined;
+		// 🔴 `send --to <uuid>` asks the group namespace first. `RECIPIENT`
+		// names an agent, so the group route is a 404 — the miss that hands the
+		// spelling to the agent arm. Scoped to this describe: the set-pricing
+		// block below answers `get` with a card of its own.
+		vi.spyOn(core.HttpClient.prototype, "get").mockRejectedValue(
+			new core.RineApiError(404, "Group not found"),
+		);
 		vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
 			encryption: new Uint8Array(32),
 			pqEncryption: undefined,

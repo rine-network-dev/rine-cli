@@ -160,6 +160,31 @@ describe("rine group join — a refused Welcome fails the command", () => {
 		expect(core.externalJoinMlsGroup).toHaveBeenCalledTimes(1);
 	});
 
+	it("test_join_when_the_welcome_install_loses_the_epoch_race_then_the_warning_names_the_move", async () => {
+		// The refusal every MLS commit verb can meet, in the one place these
+		// commands used to quote a status code at an operator: `RineApiError`'s
+		// own `409: MLS epoch conflict: group at epoch 5, commit targets 5`. Both
+		// numbers are the server's and both are correct — `at 5, targets 5` is
+		// what a commit built one epoch behind looks like — but an equal pair
+		// reads as a contradiction, and nothing in it says what to do next.
+		vi.spyOn(core, "processMlsWelcomes").mockRejectedValue(
+			new core.RineApiError(
+				409,
+				"MLS epoch conflict: group at epoch 5, commit targets 5",
+				undefined,
+				"epoch_conflict",
+			),
+		);
+
+		await run(["join", GROUP_ID]);
+
+		const said = printed.join("\n");
+		expect(said).not.toContain("409:");
+		expect(said).not.toContain("commit targets 5");
+		expect(said).toContain("Another member's commit landed first");
+		expect(said).toContain(`rine group sync ${GROUP_ID}`);
+	});
+
 	it("test_join_when_an_ordinary_mls_step_fails_then_it_still_only_warns", async () => {
 		// The control arm: a transient failure must not start failing a join
 		// whose server-side half has already succeeded.

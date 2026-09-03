@@ -95,10 +95,53 @@ describe("group requests — the bar, and whether your vote counts", () => {
 	it("reports the shortfall and says an eligible member can vote", async () => {
 		const row = await renderRow(request());
 
-		expect(row.Approved).toBe(1);
+		// `1 of 2`, never a bare `1`: the wire carries the SHORTFALL, and this
+		// row's one approval against a shortfall of one used to print
+		// `Approved 1 | Needed 1` — which reads as carried on a request that is
+		// still open. The threshold is the shortfall added back on.
+		expect(row.Approved).toBe("1 of 2");
 		expect(row.Needed).toBe(1);
 		expect(row.Eligible).toBe(3);
 		expect(row["Can Vote"]).toBe("you can vote");
+	});
+
+	// The whole of the vote-table fix in one row: both bars stand at one vote cast and one more
+	// wanted, so a cast-of-shortfall rendering prints `1 of 1` for each and says
+	// the request is simultaneously carried and refused. Read together, the two
+	// cells must agree on one convention and both must say the request is open.
+	it("renders both bars in one convention, so neither reads as met", async () => {
+		const row = await renderRow(
+			request({ approvals: 1, approvals_needed: 1, denials: 1, denials_needed: 1 }),
+		);
+
+		expect(row.Approved).toBe("1 of 2");
+		expect(row.Denials).toBe("1 of 2");
+		expect(row.Needed).toBe(1);
+	});
+
+	it("never quotes a bar it cannot know, on a request that already met one", async () => {
+		// The clamped arm. The server's shortfall is `max(required - cast, 0)`,
+		// so a request whose electorate shrank below what it already holds
+		// reports `needed = 0` and stays PENDING — nothing votes again, so
+		// nothing recomputes it. Adding the shortfall back on gives `3 of 3`
+		// about a request whose bar is 2: the meaning survives and the number an
+		// operator quotes does not. Zero proves an upper bound, not a value, and
+		// that is the whole of what the cell may claim.
+		const row = await renderRow(
+			request({
+				approvals: 3,
+				approvals_needed: 0,
+				denials: 0,
+				denials_needed: 2,
+				electorate_size: 3,
+			}),
+		);
+
+		expect(row.Approved).toBe("3 of 3 or fewer");
+		expect(row.Approved).not.toBe("3 of 3");
+		// The other bar is untouched: a clamp on one says nothing about the other.
+		expect(row.Denials).toBe("0 of 2");
+		expect(row.Needed).toBe(0);
 	});
 
 	it("tells a member who joined after filing that their vote would not count", async () => {
@@ -127,18 +170,28 @@ describe("group requests — the bar, and whether your vote counts", () => {
 		);
 
 		expect(row.Eligible).toBe(0);
-		// Neither bar is reachable: the request stands until it expires.
+		// Neither bar is reachable: the request stands until it expires. What has
+		// been cast is still known and still printed — it is the threshold that
+		// cannot be computed, so the dash sits on the right of the `of`.
 		expect(row.Needed).toBe("—");
+		expect(row.Approved).toBe("0 of —");
 		expect(row.Denials).toBe("0 of —");
 		expect(row["Can Vote"]).toBe("nobody eligible is still in the group");
 	});
 
 	// ── the denial bar is a column, not a shortfall against nothing ────────────
 
-	it("reports the denials cast and how many more would refuse the request", async () => {
-		const row = await renderRow(request({ denials: 0, denials_needed: 2 }));
-
-		expect(row.Denials).toBe("0 of 2");
+	it("reports the denials cast against the count that would refuse the request", async () => {
+		// Two rows of one bar. Nothing cast yet is the case where shortfall and
+		// threshold coincide, which is exactly why the old rendering read as
+		// correct; the second row is where they part, and one denial of the two
+		// this bar takes must not print as `1 of 1`.
+		expect(
+			(await renderRow(request({ denials: 0, denials_needed: 2 }))).Denials,
+		).toBe("0 of 2");
+		expect(
+			(await renderRow(request({ denials: 1, denials_needed: 1 }))).Denials,
+		).toBe("1 of 2");
 	});
 
 	it("renders a denial bar the server did not report as a dash and never as zero", async () => {
@@ -191,7 +244,7 @@ describe("group requests — the bar, and whether your vote counts", () => {
 	});
 
 	// The nomination row too: it is born carrying the nominating member's
-	// own approval, so `Approved: 1` on an untouched request is ordinary, and the
+	// own approval, so `Approved: 1 of 2` on an untouched request is ordinary, and the
 	// nominator reads their vote as counted rather than as one they still owe.
 	it("names the vote already cast", async () => {
 		const row = await renderRow(
@@ -202,7 +255,7 @@ describe("group requests — the bar, and whether your vote counts", () => {
 			}),
 		);
 
-		expect(row.Approved).toBe(1);
+		expect(row.Approved).toBe("1 of 2");
 		expect(row["Your Vote"]).toBe("approve");
 		expect(row["Can Vote"]).toBe("you already voted approve");
 	});
@@ -217,6 +270,9 @@ describe("group requests — the bar, and whether your vote counts", () => {
 		);
 
 		expect(row.Eligible).toBe("");
+		// An unrecorded electorate does not make the bar unknown: the server still
+		// says how many more approvals it takes, so the threshold is still a sum.
+		expect(row.Approved).toBe("1 of 3");
 		expect(row["Can Vote"]).toBe(
 			"you can vote (filed before the electorate was recorded; any member may)",
 		);

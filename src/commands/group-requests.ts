@@ -15,6 +15,7 @@ import {
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import { admitToMls, mlsFailureText } from "./group-mls.js";
 import { admissionOutcomeRows, inviteRow, requestRow } from "./group-rows.js";
@@ -91,6 +92,14 @@ export function registerGroupRequests(program: Command, group: Command): void {
 		.command("requests")
 		.description("List what this group still owes an answer on")
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
+		// 🔴 Not a filter and not decoration: `GET /groups/{id}/requests` resolves
+		// the caller through `get_acting_group_member`, so the acting agent decides
+		// both whether the read is allowed at all and what `Your Vote` and `Can
+		// Vote` say on every row. Two agents of one org reading the same queue get
+		// two different answers, and this is the flag that picks which.
+		.addOption(
+			actorOption("which agent is asking, and whose vote the rows report"),
+		)
 		.option(
 			"--outstanding <filter>",
 			"pending (the vote queue — requests agents filed for themselves and nominations members filed for them), invited (unaccepted invitations), or live (both)",
@@ -127,6 +136,11 @@ export function registerGroupRequests(program: Command, group: Command): void {
 				" group's electorate decides — joining that one records that you want" +
 				" in and leaves the request with them.",
 		)
+		// "Addressed to you" is the whole route: `GET /groups/invites` answers for
+		// the acting agent and no sibling of it, so on a multi-agent org this flag
+		// is what "you" means. It reaches the wire through the header `withClient`
+		// pins for a named actor, which is why this verb still asks for no id.
+		.addOption(actorOption("whose invitations and nominations to list"))
 		.action(
 			withClient(program, async ({ client, gOpts, extraHeaders }) => {
 				const items = await listMyInvites(client, extraHeaders);
@@ -142,6 +156,10 @@ export function registerGroupRequests(program: Command, group: Command): void {
 		.command("resume-admission")
 		.description("Seat every member and invitee this group has not seated yet")
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
+		// Every commit this verb mints is signed by one agent's ratchet-tree leaf,
+		// and it is that agent's local MLS state the seating continues from — so on
+		// a multi-agent org the flag names the one member whose state can do it.
+		.addOption(actorOption("which agent is acting, and seats the others"))
 		.option(
 			"--reclaim",
 			"Also retire ratchet-tree leaves no member and no live invitation or" +
@@ -212,6 +230,11 @@ export function registerGroupRequests(program: Command, group: Command): void {
 		)
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
 		.argument("<request-id>", "Join request ID")
+		// A vote is cast by an agent, not by an org: the server records it against
+		// whoever `X-Rine-Agent` names, and the electorate is a set of agents. On a
+		// multi-agent org this flag is what decides whose ballot is spent — and the
+		// same agent then mints the add commit that seats a carried applicant.
+		.addOption(actorOption("which agent casts the vote"))
 		.requiredOption("--vote <vote>", "Vote: approve or deny")
 		.action(
 			withClient(

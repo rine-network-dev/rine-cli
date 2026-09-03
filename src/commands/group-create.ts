@@ -11,6 +11,7 @@ import {
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { announceHandleCompletion } from "../handle-completion.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import {
@@ -179,6 +180,13 @@ export function registerGroupCreate(program: Command, group: Command): void {
 		)
 		.option("--isolated", "Isolate group communication")
 		.option("--vote-duration <hours>", VOTE_DURATION_RULE)
+		// 🔴 Not decoration, and the worst verb to leave without it: `foundMlsState`
+		// founds the ratchet tree AS the acting agent, so on a multi-agent org that
+		// names nobody the org's shortcut picks the leaf holder — and the only
+		// remedy for the wrong one is orphan reclamation, which is never automatic.
+		// `withClient` pins `X-Rine-Agent` for any actor the ladder names, so the
+		// flag reaches the wire on `POST /groups` as well as the init.
+		.addOption(actorOption("which agent is acting, and founds the group"))
 		.action(
 			withClient(program, async (ctx: ActionContext, opts: CreateOpts) => {
 				const refusal = visibilityRefusal(opts.visibility);

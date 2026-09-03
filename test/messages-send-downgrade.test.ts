@@ -69,6 +69,9 @@ function stubServer(group: Record<string, unknown>): void {
 	vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
 		async (path: string) => {
 			if (path === "/groups") return { items: [group] };
+			// The id rung's own route. A UUID is asked for by id, and the row it
+			// answers with is the one every sentence below has to be about.
+			if (path === `/groups/${GROUP_ID}`) return group;
 			return {};
 		},
 	);
@@ -80,7 +83,7 @@ function stubServer(group: Record<string, unknown>): void {
 	);
 }
 
-async function send(): Promise<void> {
+async function send(to: string = GROUP_HANDLE): Promise<void> {
 	const program = new Command();
 	program.option("--json", "Output JSON");
 	program.option("--profile <profile>", "Profile name");
@@ -92,7 +95,7 @@ async function send(): Promise<void> {
 		"rine",
 		"send",
 		"--to",
-		GROUP_HANDLE,
+		to,
 		"--payload",
 		'{"text":"hi group"}',
 	]);
@@ -254,6 +257,20 @@ describe("rine send — the branch is the send predicate", () => {
 		);
 		const minutes = Math.round(core.MLS_PENDING_SELF_CLEAR_SECONDS / 60);
 		expect((thrown as Error).message).toContain(`${minutes} minutes`);
+	});
+
+	it("send_when_init_is_pending_names_the_group_the_server_holds_not_the_spelling_typed", async () => {
+		// A UUID may address a group, and the note printed a line earlier
+		// has already resolved it to `#dev@…`. The refusal echoed the UUID back,
+		// so one event read two ways — the same defect `group-recovery.ts` calls
+		// out by name on the sync path. `to_handle` on the wire is the server's
+		// spelling; the sentence has to be the same one.
+		stubServer(makeGroup({ mls_pending: true }));
+
+		await send(GROUP_ID);
+
+		expect((thrown as Error).message).toContain(GROUP_HANDLE);
+		expect((thrown as Error).message).not.toContain(GROUP_ID);
 	});
 
 	it("send_when_init_is_pending_tells_the_guard_the_group_is_mls", async () => {

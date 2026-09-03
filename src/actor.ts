@@ -70,6 +70,19 @@ export function actorAliasOption(flags: string, description: string): Option {
 	return option;
 }
 
+/**
+ * Whether this option is an actor spelling, rather than some other `--agent`.
+ *
+ * {@link ACTOR_FLAGS} is the only thing that can tell them apart: `webhook list
+ * --agent` spells the same flag as a FILTER, so a comparison on the flag string
+ * answers that one wrong. Exported for the gate that walks the command tree and
+ * asserts every declared actor flag reaches the wire — what puts it there is a
+ * single line in `action.ts`, and a declaration test cannot see it.
+ */
+export function isActorOption(option: Option): boolean {
+	return ACTOR_FLAGS.has(option);
+}
+
 function isCommand(value: unknown): value is Command {
 	const candidate = value as Command | undefined;
 	return (

@@ -9,6 +9,7 @@ import {
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
+import { actorOption } from "../actor.js";
 import { printError, printJson, printText } from "../output.js";
 import { mlsFailureText } from "./group-mls.js";
 import { CLI_UNFOUNDED_REPAIR } from "./group-rows.js";
@@ -32,6 +33,11 @@ export function registerGroupSync(program: Command, group: Command): void {
 			"Catch this agent's group encryption state up, and say what it cost",
 		)
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
+		// Group encryption state is per AGENT — one ratchet-tree leaf, one local
+		// store — so "catch this agent's state up" has to say which agent on a
+		// multi-agent org. `recoverGroup` is handed the id below and the header
+		// rides with it.
+		.addOption(actorOption("which agent's group state is caught up"))
 		.action(
 			withClient(program, async (ctx: ActionContext, ref: string) => {
 				// One read, not two: the ladder's UUID rung IS `GET /groups/{id}`.

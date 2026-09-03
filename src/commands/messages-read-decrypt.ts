@@ -16,11 +16,18 @@
 import {
 	type HttpClient,
 	type MessageRead,
+	MLS_ERR_GROUP_INACTIVE,
 	SENDER_KEY_UNAVAILABLE_CODE,
 	asSenderKeyUnavailable,
+	cliSyncRemedy,
 	decryptGroupMessageWithRecovery,
 	decryptMessage,
+	formatError,
+	isRecoverableMlsRead,
+	mlsReadRefusal,
+	mlsErrorCode,
 } from "@rine-network/core";
+import { mlsFailureText } from "./group-mls.js";
 
 type DecryptResult = Awaited<ReturnType<typeof decryptMessage>>;
 
@@ -71,7 +78,7 @@ export async function openMessage(opts: {
 				refusal: null,
 			};
 		} catch (err) {
-			return { refusal: { message: `Decryption failed: ${text(err)}`, code: null } };
+			return { refusal: refusalFor(err, null) };
 		}
 	}
 
@@ -96,21 +103,52 @@ export async function openMessage(opts: {
 		// Everything the recovery can end in arrives here, the transport failures
 		// of the recovery's own fetch included — which is what makes this
 		// function's "never throws" true rather than merely stated.
-		const unavailable = asSenderKeyUnavailable(err, groupId);
-		if (unavailable !== null) {
-			return {
-				refusal: {
-					message: unavailable.message,
-					code: SENDER_KEY_UNAVAILABLE_CODE,
-				},
-			};
-		}
-		return {
-			refusal: { message: `Decryption failed: ${text(err)}`, code: null },
-		};
+		return { refusal: refusalFor(err, groupId) };
 	}
 }
 
-function text(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+/**
+ * Why the message stayed closed, chosen by the failure's machine-readable CODE
+ * and never by its words.
+ *
+ * `groupId` is null for a 1:1 envelope, where no group arm can apply.
+ *
+ * `rine thread` has degraded correctly since it was written — a recognised
+ * cause becomes a rine sentence, an unrecognised one becomes `[unavailable]` —
+ * while this path interpolated whatever it caught. What that let through was
+ * mls-rs's own KDF error, *the provided length of the key 0 is shorter than the
+ * minimum length 32*: the crypto library refusing to derive from an epoch
+ * secret this member never held. Same message, same agent, same moment, two
+ * renderers, and the raw one was the outlier.
+ */
+function refusalFor(err: unknown, groupId: string | null): DecryptRefusal {
+	if (groupId !== null) {
+		const unavailable = asSenderKeyUnavailable(err, groupId);
+		if (unavailable !== null) {
+			return {
+				message: unavailable.message,
+				code: SENDER_KEY_UNAVAILABLE_CODE,
+			};
+		}
+		// 🔴 Asked BEFORE the recoverable arm, which answers **true** for an
+		// eviction: the core classifies it as an unprocessable commit, and it is
+		// one. But no sync undoes a Remove, so offering the remedy below would be
+		// a false move — and rine already states this one as a membership fact,
+		// in `mlsFailureText`, which is where the words stay.
+		if (mlsErrorCode(err) === MLS_ERR_GROUP_INACTIVE) {
+			return { message: mlsFailureText(err, groupId), code: null };
+		}
+		// The core's own classifier for "no key here opens this, and installing
+		// Welcomes or syncing commits might change that". It answers false for a
+		// self-read cache miss, which forward secrecy has made permanent, and for
+		// the three local-process failures — naming a remedy for a store I/O
+		// failure would be a lie. Those keep the words they arrived with.
+		if (isRecoverableMlsRead(err)) {
+			return {
+				message: mlsReadRefusal(groupId, cliSyncRemedy(groupId)),
+				code: null,
+			};
+		}
+	}
+	return { message: `Decryption failed: ${formatError(err)}`, code: null };
 }
