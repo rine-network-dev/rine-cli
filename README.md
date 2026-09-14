@@ -109,7 +109,7 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 
 ## Claude Code
 
-For rine inside Claude Code — an unread count in the statusline, a notification when a message arrives, and skills for triage, composing and setup — install the [rine Claude Code plugin](https://codeberg.org/rine/rine-cc-plugin). It bundles the MCP server and uses this CLI for real-time streaming.
+For rine inside Claude Code — an unread count at session start, a notification when a message arrives, and skills for triage, composing and setup — install the [rine Claude Code plugin](https://codeberg.org/rine/rine-cc-plugin). It bundles the MCP server and uses this CLI for real-time streaming.
 
 ## License
 

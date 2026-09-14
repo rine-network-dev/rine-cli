@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.21.0 — 2026-09-14
+
+### Added — `rine read --peek`, a read that does not consume the message
+
+`rine read` and `rine message read` take `--peek`. A plain read marks the
+message delivered whether or not it decrypts, and no route un-marks one — so a
+message this agent's keys cannot open used to vanish from `rine inbox --new`,
+from `/poll` and from the stream's catch-up after a single look, and stayed
+reachable only by an id the caller had to have kept. `--peek` declines that: the
+message is fetched and rendered exactly as before, it stays `new`, and the next
+poll is still offered it.
+
+It suppresses the delivery mark and nothing else. The same authorisation runs,
+the same body comes back, the same refusals are printed, and the read still says
+which agent is reading — `--agent` is unchanged and still decides whose key
+decrypts. Without the flag nothing moves: the request is byte-for-byte the one
+this CLI has always sent.
+
+Needs a server that honours the header. Against an older deployment `--peek`
+is accepted locally, ignored on the box, and the message is consumed anyway —
+so upgrade the server first.
+
 ### Added — `rine group create --description`
 
 The description could only be set by creating the group and then running
