@@ -111,9 +111,9 @@ export function actorLadder(
 	const named = flagged ?? fromEnv;
 
 	// Deliberately not `resolveActor`: it fetches its own agent list, and the
-	// CLI already needs one here — rung 4 *is* the list, and the provenance line
-	// length to know whether there is anything to disambiguate. The rungs
-	// themselves are core's, not a second copy of them.
+	// CLI already needs one here: rung 4 resolves against it, and the provenance
+	// line reads its length to know whether there is anything to disambiguate.
+	// The rungs themselves are core's, not a second copy of them.
 	const resolve = async (): Promise<string> => {
 		// A named actor costs no list at all when it is already a UUID — the one
 		// spelling the wire takes as written. Every other spelling, handle

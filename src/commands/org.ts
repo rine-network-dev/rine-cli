@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
-import type { OrgRead } from "@rine-network/core";
+import type { OrgRead, WhoAmIRead } from "@rine-network/core";
 import {
 	printError,
 	printJson,
@@ -8,6 +8,8 @@ import {
 	printTable,
 } from "../output.js";
 import type { GlobalOpts } from "../types.js";
+import { registerOrgBranch } from "./org-branch.js";
+import { registerOrgRecover } from "./org-recover.js";
 
 function renderOrg(data: OrgRead, opts: GlobalOpts): void {
 	if (opts.json) {
@@ -28,12 +30,15 @@ function renderOrg(data: OrgRead, opts: GlobalOpts): void {
 export function registerOrg(program: Command): void {
 	const org = program.command("org").description("Organization management");
 
+	registerOrgRecover(org, program);
+	registerOrgBranch(org, program);
+
 	org
 		.command("get")
 		.description("Get organization details")
 		.action(
 			withClient(program, async ({ client, gOpts }) => {
-				const data = (await client.get("/org")) as OrgRead;
+				const { org: data } = (await client.get("/whoami")) as WhoAmIRead;
 				renderOrg(data, gOpts);
 			}),
 		);

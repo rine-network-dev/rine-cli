@@ -1,73 +1,38 @@
 import type { Command } from "commander";
-import { withClient, withErrorHandler } from "../action.js";
-import { actorLadder } from "../acting-agent.js";
-import { namedActor } from "../actor.js";
+import { resolveDirs, withClient, withErrorHandler } from "../action.js";
 import {
-	type OrgRead,
-	HttpClient,
-	agentKeysExist,
-	cacheToken,
-	fetchOAuthToken,
-	formatError,
-	getCredentialEntry,
+	DEFAULT_PROFILE,
+	type WhoAmIRead,
 	getOrRefreshToken,
-	loadCredentials,
 	loadTokenCache,
+	principalString,
 	resolveApiUrl,
-	resolveConfigDir,
-	saveCredentials,
+	resolveAuth,
 	saveTokenCache,
 } from "@rine-network/core";
-import { printError, printJson, printSuccess, printTable } from "../output.js";
-import { promptPassword, promptText } from "../prompt.js";
+import { printJson, printSuccess, printTable } from "../output.js";
 import type { GlobalOpts } from "../types.js";
+import { registerWhoami } from "./whoami.js";
 
 export function registerAuth(program: Command): void {
-	// rine login [--client-id ID] [--client-secret SECRET]
-	// Left as manual try/catch — interactive credential prompting is unique
-	program
-		.command("login")
-		.description("Log in with OAuth2 client credentials")
-		.option("--client-id <id>", "Client ID")
-		.option("--client-secret <secret>", "Client secret")
-		.action(async (opts: { clientId?: string; clientSecret?: string }) => {
-			try {
-				const gOpts = program.opts<GlobalOpts>();
-				const profile = gOpts.profile ?? "default";
-				const configDir = resolveConfigDir();
-				const apiUrl = resolveApiUrl();
-				const clientId = opts.clientId ?? (await promptText("Client ID: "));
-				const clientSecret =
-					opts.clientSecret ?? (await promptPassword("Client secret: "));
-
-				const tokenData = await fetchOAuthToken(apiUrl, clientId, clientSecret);
-
-				const creds = loadCredentials(configDir);
-				creds[profile] = { client_id: clientId, client_secret: clientSecret };
-				saveCredentials(configDir, creds);
-
-				cacheToken(configDir, profile, tokenData);
-
-				printSuccess(`Logged in as ${clientId}`);
-			} catch (err) {
-				printError(formatError(err));
-				process.exitCode = 1;
-			}
-		});
-
 	// rine logout
 	program
 		.command("logout")
-		.description("Clear cached token. Credentials are preserved.")
+		.description("Clear cached token. Keys are preserved.")
 		.action(
 			withErrorHandler(program, (gOpts) => {
-				const profile = gOpts.profile ?? "default";
-				const configDir = resolveConfigDir();
-				const cache = loadTokenCache(configDir);
-				delete cache[profile];
-				saveTokenCache(configDir, cache);
+				const profile = gOpts.profile ?? DEFAULT_PROFILE;
+				const dirs = resolveDirs();
+				const auth = resolveAuth(dirs, gOpts.profile);
+				if (!auth) {
+					printSuccess("Not logged in — nothing to clear.");
+					return;
+				}
+				const cache = loadTokenCache(auth.cacheDir);
+				delete cache[principalString(auth.signer.principal)];
+				saveTokenCache(auth.cacheDir, cache);
 				printSuccess(
-					`Logged out — token cache cleared for profile '${profile}'. Credentials preserved.`,
+					`Logged out — token cache cleared for profile '${profile}'. Keys preserved.`,
 				);
 			}),
 		);
@@ -82,106 +47,7 @@ export function registerAuth(program: Command): void {
 			}),
 		);
 
-	// rine whoami
-	program
-		.command("whoami")
-		.description("Show current identity and status")
-		.action(async () => {
-			const gOpts = program.opts<GlobalOpts>();
-			const profile = gOpts.profile ?? "default";
-			const configDir = resolveConfigDir();
-			const apiUrl = resolveApiUrl();
-
-			const entry = getCredentialEntry(configDir, profile);
-			if (!entry) {
-				if (gOpts.json) {
-					printJson({ logged_in: false });
-				} else {
-					printTable([{ Field: "Status", Value: "not logged in" }]);
-				}
-				return;
-			}
-
-			try {
-				const token = await getOrRefreshToken(configDir, apiUrl, entry, profile);
-				const defaultHeaders: Record<string, string> = {};
-				const client = new HttpClient({
-					tokenFn: () => Promise.resolve(token),
-					apiUrl,
-					canRefresh: false,
-					defaultHeaders,
-				});
-				const { agents, actingAgent } = actorLadder(
-					namedActor(undefined, gOpts),
-					client,
-					defaultHeaders,
-				);
-
-				const org = (await client.get("/org")) as OrgRead;
-
-				// Try to resolve agent
-				let agentHandle: string | undefined;
-				let agentId: string | undefined;
-				let keysLabel: string | undefined;
-
-				try {
-					agentId = await actingAgent();
-					const agent = (await agents()).find((a) => a.id === agentId);
-					agentHandle = agent?.handle ?? undefined;
-
-					const hasLocal = agentKeysExist(configDir, agentId);
-					let hasServer = false;
-					try {
-						await client.get(`/agents/${agentId}/keys`);
-						hasServer = true;
-					} catch {
-						// no server keys
-					}
-					keysLabel =
-						hasLocal && hasServer
-							? "local + server"
-							: hasLocal
-								? "local only"
-								: hasServer
-									? "server only"
-									: "none";
-				} catch {
-					// no agent resolvable — omit agent fields
-				}
-
-				if (gOpts.json) {
-					printJson({
-						profile,
-						api: apiUrl,
-						org: { name: org.name, slug: org.slug },
-						trust_tier: org.trust_tier,
-						...(agentId
-							? {
-									agent: agentHandle ?? null,
-									agent_id: agentId,
-									keys: keysLabel,
-								}
-							: {}),
-					});
-				} else {
-					const rows = [
-						{ Field: "Profile", Value: profile },
-						{ Field: "API", Value: apiUrl },
-						{ Field: "Org", Value: `${org.name} (${org.slug})` },
-						{ Field: "Trust Tier", Value: String(org.trust_tier) },
-					];
-					if (agentId) {
-						rows.push({ Field: "Agent", Value: agentHandle ?? "-" });
-						rows.push({ Field: "Agent ID", Value: agentId });
-						rows.push({ Field: "Keys", Value: keysLabel ?? "none" });
-					}
-					printTable(rows);
-				}
-			} catch (err) {
-				printError(formatError(err));
-				process.exitCode = 1;
-			}
-		});
+	registerWhoami(program);
 
 	// rine auth (group)
 	const authGroup = program.command("auth").description("Auth commands");
@@ -192,23 +58,25 @@ export function registerAuth(program: Command): void {
 		.option("--force", "Force token refresh (bypass cache)")
 		.action(
 			withErrorHandler(program, async (gOpts, opts: { force?: boolean }) => {
-				const profile = gOpts.profile ?? "default";
 				const force = opts.force === true;
-				const configDir = resolveConfigDir();
+				const dirs = resolveDirs();
 				const apiUrl = resolveApiUrl();
+				const auth = resolveAuth(dirs, gOpts.profile);
 
 				const now = Date.now() / 1000;
 				const envToken = process.env.RINE_TOKEN;
-				const cache = loadTokenCache(configDir);
-				const cached = cache[profile];
+				const cacheDir = auth?.cacheDir ?? dirs.configDir;
+				const cache = loadTokenCache(cacheDir);
+				const cached = auth
+					? cache[principalString(auth.signer.principal)]
+					: undefined;
 				const source: "cache" | "server" =
 					envToken !== undefined ||
 					(!force && cached !== undefined && cached.expires_at - now > 60)
 						? "cache"
 						: "server";
 
-				const entry = getCredentialEntry(configDir, profile);
-				const token = await getOrRefreshToken(configDir, apiUrl, entry, profile, {
+				const token = await getOrRefreshToken(cacheDir, apiUrl, auth?.signer, {
 					force,
 					envToken,
 				});
@@ -235,7 +103,7 @@ async function showOrgStatus(
 	client: { get: (path: string) => Promise<unknown> },
 	gOpts: GlobalOpts,
 ): Promise<void> {
-	const data = (await client.get("/org")) as OrgRead;
+	const { org: data } = (await client.get("/whoami")) as WhoAmIRead;
 	if (gOpts.json) {
 		printJson(data);
 		return;

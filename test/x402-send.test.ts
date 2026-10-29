@@ -35,10 +35,8 @@ beforeEach(() => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine-x402");
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "resolveToUuid").mockImplementation((_url, h) =>
 		Promise.resolve(h),
@@ -75,13 +73,9 @@ describe("rine send — x402 payment_required attaches cleartext extras", () => 
 		vi.spyOn(core.HttpClient.prototype, "get").mockRejectedValue(
 			new core.RineApiError(404, "Group not found"),
 		);
-		vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
-			encryption: new Uint8Array(32),
-			pqEncryption: undefined,
-		} as never);
-		vi.spyOn(core, "encryptMessage").mockResolvedValue({
+		vi.spyOn(core, "sealForAgent").mockResolvedValue({
 			encrypted_payload: "ct",
-			encryption_version: "hpke-v1",
+			encryption_version: "hpke-hybrid-v2",
 			sender_signing_kid: `rine:${SENDER}`,
 		} as never);
 		vi.spyOn(core.HttpClient.prototype, "post").mockImplementation(

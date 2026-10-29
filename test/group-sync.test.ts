@@ -17,6 +17,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
 import * as outputModule from "../src/output.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 const CONFIG_DIR = "/tmp/test-rine-group-sync";
 const API_URL = "https://test.rine.network";
@@ -45,10 +46,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	// The acting-agent ladder's rung 4: one agent in the org, so the command
 	// names an actor without the caller typing one.
@@ -125,6 +124,7 @@ describe("rine group sync", () => {
 			behind: 3,
 			processed: 3,
 			evicted: false,
+			escrow: NO_ESCROW,
 		});
 
 		await run(["sync", GROUP_ID]);
@@ -156,6 +156,7 @@ describe("rine group sync", () => {
 			behind: 3,
 			processed: 3,
 			evicted: false,
+			escrow: NO_ESCROW,
 		});
 
 		// Addressed by UUID, so the argument and the row's handle differ and
@@ -214,6 +215,21 @@ describe("rine group sync", () => {
 		// Its own exit code, because the remedy is an admin's and not a retry.
 		expect(process.exitCode).toBe(2);
 		expect(errors.join("\n")).toContain("Ask an admin to remove this agent");
+		expect(printed).toEqual([]);
+	});
+
+	it("test_sync_when_the_agent_rotated_its_key_then_it_exits_2_and_names_the_remedy", async () => {
+		vi.spyOn(core, "recoverGroup").mockRejectedValue(
+			new core.MlsRotatedLeafError(AGENT_ID, GROUP_ID),
+		);
+
+		await run(["sync", GROUP_ID]);
+
+		// The remedy is a member's (remove and re-invite), not a retry.
+		expect(process.exitCode).toBe(2);
+		const said = errors.join("\n");
+		expect(said).toContain("still carries a key it has since rotated away from");
+		expect(said).toContain("remove the agent and invite it again");
 		expect(printed).toEqual([]);
 	});
 

@@ -1,10 +1,10 @@
-// Item 18 — `rine send` names the handle it actually addressed.
+// `rine send` names the handle it actually addressed.
 //
 // `resolveToUuid` completes a short handle before WebFinger sees it, and hands
 // back a UUID rather than the spelling it resolved. On `send` that is the most
 // expensive silence in the CLI: the message is sealed for, and delivered to,
-// whoever the completed handle names, and the caller is told nothing. Item 18
-// shipped this on `discover inspect`; the founder widened it to every call site.
+// whoever the completed handle names, and the caller is told nothing. The
+// announcement covers every call site.
 //
 // 🔴 The whole reason this file is separate from the other two `send` suites is
 // that both of them mock `normalizeHandle` to identity. This one runs the REAL
@@ -49,10 +49,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: SENDER, handle: "me@acme.rine.network" },
@@ -60,13 +58,9 @@ beforeEach(() => {
 	vi.spyOn(core, "resolveAgent").mockResolvedValue({ agentId: SENDER });
 	// 🔴 NOT mocked: `normalizeHandle`. See the header.
 	vi.spyOn(core, "resolveToUuid").mockResolvedValue(RECIPIENT);
-	vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
-		encryption: "recipient-x25519",
-		pqEncryption: null,
-	} as never);
-	vi.spyOn(core, "encryptMessage").mockResolvedValue({
+	vi.spyOn(core, "sealForAgent").mockResolvedValue({
 		encrypted_payload: "ENC",
-		encryption_version: "hpke-v1",
+		encryption_version: "hpke-hybrid-v2",
 		sender_signing_kid: `rine:${SENDER}`,
 	} as never);
 	// 🔴 `send --to <uuid>` asks the group namespace before the agent one,
@@ -126,6 +120,11 @@ describe("rine send — a completed recipient handle is announced", () => {
 		// it does not undo it. What crossed the wire is still the completion.
 		expect(posts).toHaveLength(1);
 		expect(posts[0]?.[1]).toMatchObject({ to_handle: COMPLETED });
+		// The seal is signed by the acting agent and scoped to the resolved recipient.
+		expect(vi.mocked(core.sealForAgent).mock.calls[0]?.[2]).toEqual({
+			senderAgentId: SENDER,
+			recipientAgentId: RECIPIENT,
+		});
 	});
 
 	it("still announces under --json, leaving stdout one parseable document", async () => {

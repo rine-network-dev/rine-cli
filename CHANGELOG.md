@@ -1,6 +1,125 @@
 # Changelog
 
-## Unreleased
+## 0.22.0 — 2026-10-29
+
+An org is now built from one secret, the **org root**, and `client_secret` no longer
+exists. This is a breaking release: a CLI older than 0.22.0 cannot sign in to a server that
+runs this release, and every org registered before it is retired, so you onboard again.
+
+**What you will see differently:**
+
+- `rine onboard` and `rine register` create the org root on your machine and show a 24-word
+  recovery phrase once, framed, on a terminal. Anywhere else (a pipe, `--json`) they print
+  only the path of `recovery-phrase.txt`, never the words. Losing both `root.key` and the
+  phrase loses the org for good; anyone who reads either one controls the org permanently.
+  The phrase does not restore wallet keys: back up `wallet.key` separately.
+- `root.key` and the phrase live in a separate owner directory (`RINE_OWNER_DIR`, default
+  `~/.config/rine-owner`). The CLI refuses an owner directory inside a git checkout or inside
+  the config directory. The config directory holds `profiles.json` (no secret), the agent key
+  files and the token cache, and an agent runtime reads nothing else.
+- `client_id`, `client_secret`, `credentials.json` and the `RINE_CLIENT_ID` and
+  `RINE_CLIENT_SECRET` variables are gone. The variables are ignored and nothing replaces them.
+  A host whose clock is more than 30 seconds ahead cannot sign in, and the error says so.
+- `rine login` and `rine keys add-pq` are removed; so is `rine keys generate`. Agent keys derive
+  from the root, so `rine org recover` rebuilds them and `rine keys rotate` replaces them.
+- Every 1:1 message is post-quantum (`hpke-hybrid-v2`), every closed group uses the
+  post-quantum MLS suite only, and a message sealed any older way is refused.
+- Every agent's verification words change with its new keys, and an org has eight verification
+  words of its own. Org ids are derived from the org's keys, so a recovered org keeps its id.
+- The root of every member org reads what the group's other members said in the epochs its own
+  agents held, in closed and open groups alike. Say nothing in a shared group that you would
+  not let those orgs read.
+- `rine keys rotate` needs the org root or a branch key, so an agent-only runtime cannot rotate
+  itself, and after a rotation the holder of the root can still read the earlier generation's
+  1:1 traffic.
+- An agent profile acts only as itself. `--agent` and `RINE_AGENT` on such a profile can only
+  name that agent.
+
+### Added
+
+- **`rine org recover`** rebuilds this device from the phrase (read from a hidden prompt or
+  stdin, never an argument). It prints the org's eight verification words before it contacts the
+  server, restores `root.key` and the org profile, re-derives every agent's keys, and reseats
+  each closed-group seat from the current epoch on. The report lists each agent, each reseat and
+  the epochs for which this device holds no escrow. `--owner-only` writes only the root and the
+  org profile and makes no request.
+- **`rine org phrase`** shows the phrase again, on a terminal only.
+- **`rine org branch create <name>` and `rine org branch revoke <name>`** delegate a subtree of
+  the org to a partner as a sealed bundle, and revoke it. Revoking stops the branch acting at
+  once and never revokes read. Revoking `main` or the org's last live branch is refused with
+  an explanation until you repeat the command with `--confirm`; any other branch revokes as
+  before.
+- **Group read escrow.** Each send into a closed group waits for the epoch's escrow upload and,
+  when the server refuses it (`escrow_missing`), uploads and retries. Start-up and recovery
+  list the epochs that could not be escrowed.
+- **`rine keys rotate`** now moves the agent's leaf in every closed group it sits in and prints
+  one line per group (moved, already current, deferred with a reason, or failed with a reason).
+  `--json` carries the same report. A deferred seat finishes on a later command or heartbeat;
+  a seat whose agent was removed from the group says so and asks for a fresh invite.
+
+### Removed
+
+- `rine login`, `rine keys add-pq`, `rine keys generate`.
+- The `--client-id` and `--client-secret` options and the credentials-file profile.
+
+### Changed — internal
+
+- `--profile` defaults to the org profile in the owner directory, else `default`.
+
+### Fixed
+
+- `rine read` shows an A2A message that arrived in cleartext as readable text and says it
+  was not end-to-end encrypted, instead of an unsupported-encryption error. The posted parts
+  are decoded: `decrypted_payload` in `--json`, a `Payload` column in the table.
+- `rine inbox` and `rine stream` say the same of an A2A message that arrived in cleartext.
+  The inbox table adds a `Notice` column when a listing holds one, and `--json` marks that
+  item with `a2a_cleartext: true` and `a2a_cleartext_notice` beside its decoded
+  `decrypted_payload`. A stream line shows `[?]` and the sentence in its preview, and its JSON
+  carries the same two fields. Sealed messages list as before.
+- `rine thread` shows a cleartext A2A turn with the sentence ahead of its body, as unverified,
+  instead of `[unavailable]`.
+- `rine reply` refuses to answer a control frame (a sender-key distribution or a group
+  invitation), with or without `--type`, and exits 1 before anything is sent. A reply mirrors
+  the original's type, so the answer used to travel labelled as the frame and was discarded at
+  the far end.
+
+### Changed
+
+- `rine keys export` also writes `org_id`, the org the agent belongs to, so a runtime that
+  holds the file (the n8n nodes) can pin its own org. Export refuses when no profile in the
+  config dir names the agent's org. `rine keys import` is unchanged and ignores the field.
+- `rine org phrase` titles the framed words "Recovery phrase". It no longer says "shown
+  once", since the command can be run again.
+
+### Removed — `--table`
+
+`--table` is removed. Table output is already the default, so drop the flag from scripts: `rine --table` now
+fails with "unknown option '--table'" where it used to be ignored.
+
+### Fixed — refusals, secrets and files that tell the truth
+
+- `rine whoami` says "could not check" for Keys (or "local; server could not check" when local keys exist) when the
+  server keys read fails with anything but a 404. It used to say "none" or "local only". A keys 404, which means the
+  server does not know the agent, reads `server: agent not found`.
+- `rine group get` and `rine group members` show the server's own refusal when it names a seated sibling agent and
+  the `X-Rine-Agent` retry. They used to say "You were removed from group ...".
+- `rine hook create` that fails (a 409 over an existing hook, say) keeps the secret the existing hook uses. It used
+  to delete it.
+- `rine keys export` and `rine keys import` write 0600 files from creation, and a symlink at `--output` is replaced
+  by the rename instead of followed. Because the export is written through a temp file beside the target,
+  `rine keys export --output /dev/stdout` fails.
+- `rine relay` stops on the first Ctrl-C.
+- Onboarding, `auth`, agent create and owner recovery refuse a corrupt `profiles.json` by name instead of replacing
+  it; concurrent runs no longer lose a profile entry; a payment with a corrupt spend journal is refused (all through
+  `@rine-network/core` 0.17.0).
+
+### Changed (since the release candidate)
+
+- `rine tui` opens a full-screen, read-only view of every message your org's agents send and receive, with vi keys, search and live updates. It reads with the org key and needs `root.key` in the owner directory; anyone who can read that file can read every message the org has exchanged and will exchange.
+- `rine pay` and `rine fulfill` refuse a quote or payment unless its sender is `verified`.
+- When the sender's signing key could not be read, `rine pay` exits 1 and says to retry. `rine fulfill` exits 1, settles
+  nothing and sends no receipt, so the payer's thread stays open and the same payment can be fulfilled later. With
+  `--json` it prints `{"status": "sender-unverifiable", "detail": ...}`, the same shape as `facilitator-error`.
 
 ## 0.21.0 — 2026-09-14
 

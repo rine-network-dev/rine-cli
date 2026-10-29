@@ -76,7 +76,7 @@ export function registerGroupCrud(program: Command, group: Command): void {
 		// acting agent from this group, and that question is about ONE agent's
 		// local state — so on a multi-agent org the flag is what says whose. It is
 		// the only rung this verb's answer turns on: `GET /groups/{id}` is
-		// org-scoped and reads the same for every agent of the org.
+		// scoped to the key and reads the same whichever agent the flag names.
 		.addOption(
 			actorOption(
 				"which agent is acting, and whose eviction from this group is reported",
@@ -101,7 +101,7 @@ export function registerGroupCrud(program: Command, group: Command): void {
 				// has paid for no agent list yet — that cost was accepted
 				// deliberately; one who typed `--agent` by name or handle has
 				// already bought it and `ctx.agents()` hands the same list back. On
-				// a group this org holds no seat in the row prints
+				// a group the credential holds no seat in the row prints
 				// `NO_OWN_AGENTS` whatever the map says, so buying
 				// one would answer nothing. Same gate the Python side takes in
 				// `rine._agent_handles._seats_to_spell`. A list that fails to load

@@ -26,10 +26,8 @@ describe("withClient", () => {
 	beforeEach(() => {
 		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
 		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-			client_id: "test-id",
-			client_secret: "test-secret",
-		});
+		vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+		vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 		vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	});
 
@@ -120,6 +118,39 @@ describe("withErrorHandler", () => {
 		const wrapped = withErrorHandler(program, fn);
 		await wrapped();
 
+		expect(process.exitCode).toBeUndefined();
+	});
+});
+
+describe("createClient — start-up escrow sweep", () => {
+	it("starts the sweep for every client it builds, leaving repeats to the library gate", async () => {
+		vi.resetModules();
+		const freshCore = await import("@rine-network/core");
+		const sweep = vi.spyOn(freshCore, "startupEscrowSweep").mockResolvedValue(undefined as never);
+		vi.spyOn(freshCore, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
+		vi.spyOn(freshCore, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+		vi.spyOn(freshCore, "resolveAuth").mockReturnValue(undefined);
+		const fresh = await import("../src/action.js");
+
+		await fresh.createClient("https://test.rine.network");
+		await fresh.createClient("https://test.rine.network");
+		await new Promise((r) => setImmediate(r));
+
+		expect(sweep).toHaveBeenCalledTimes(2);
+		expect(sweep).toHaveBeenCalledWith(expect.anything(), "/tmp/test-rine", undefined);
+	});
+
+	it("never fails the command when the sweep fails", async () => {
+		vi.resetModules();
+		const freshCore = await import("@rine-network/core");
+		vi.spyOn(freshCore, "startupEscrowSweep").mockRejectedValue(new Error("server down"));
+		vi.spyOn(freshCore, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
+		vi.spyOn(freshCore, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+		vi.spyOn(freshCore, "resolveAuth").mockReturnValue(undefined);
+		const fresh = await import("../src/action.js");
+
+		await expect(fresh.createClient("https://test.rine.network")).resolves.toBeDefined();
+		await new Promise((r) => setImmediate(r));
 		expect(process.exitCode).toBeUndefined();
 	});
 });

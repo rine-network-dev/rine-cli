@@ -185,7 +185,7 @@ export function registerDiscover(program: Command): void {
 				// instead of being refused. Throws rather than printing:
 				// `withErrorHandler` prints and sets the same exit code 1.
 				//
-				// 🔴 Item 18: that completion is announced, never silent. A caller
+				// 🔴 That completion is announced, never silent. A caller
 				// who typed `kofi@acme` is looked up as something they did not
 				// write, and being told which agent was actually inspected is the
 				// difference between a helpful default and a wrong answer nobody

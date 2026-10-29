@@ -6,8 +6,9 @@
 // FROZEN-CONTRACT: the HMAC secret is generated CLIENT-SIDE and NEVER sent to
 // rine — the create POST body carries ONLY {hook_name, tier} (tier is the
 // termination tier or null = "backend default"; NEVER the secret). The secret is
-// persisted 0600 BEFORE anything prints, deleted if the allocation POST fails (no
-// orphan), printed exactly ONCE on create, and NEVER shown by `list`.
+// persisted 0600 BEFORE anything prints, put back the way it was if the
+// allocation POST fails (no orphan, and an existing hook keeps its secret),
+// printed exactly ONCE on create, and NEVER shown by `list`.
 
 import {
 	FUNNEL_TIERS,
@@ -15,10 +16,9 @@ import {
 	type HookCreated,
 	type HookListResponse,
 	RineApiError,
+	createHook,
 	deleteHookSecret,
-	generateHookSecret,
 	hookNameError,
-	saveHookSecret,
 } from "@rine-network/core";
 import { type Command, Option } from "commander";
 import { withClient } from "../action.js";
@@ -101,23 +101,13 @@ export function registerHook(program: Command): void {
 					}
 					const agentId = await actingAgent();
 
-					// Generate + persist the secret BEFORE the POST (the allocation is
-					// non-idempotent): on a POST failure we delete it so no orphan secret
-					// survives an unallocated hook. `tier: null` means "let the backend
-					// resolve the default for the org's trust tier".
-					const secret = generateHookSecret();
-					saveHookSecret(configDir, agentId, opts.name, secret);
-					let created: HookCreated;
-					try {
-						created = (await client.post(`/agents/${agentId}/funnel/hooks`, {
-							hook_name: opts.name,
-							tier: tier ?? null,
-						})) as HookCreated;
-					} catch (err) {
-						deleteHookSecret(configDir, agentId, opts.name);
-						throw err;
-					}
-
+					const { created, secret } = await createHook(
+						client,
+						configDir,
+						agentId,
+						opts.name,
+						tier,
+					);
 					printCreated(created, secret, gOpts.json);
 				},
 			),
@@ -130,7 +120,7 @@ export function registerHook(program: Command): void {
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts,  actingAgent }) => {
+				async ({ client, gOpts, actingAgent }) => {
 					const agentId = await actingAgent();
 					const data = (await client.get(
 						`/agents/${agentId}/funnel/hooks`,
@@ -237,7 +227,7 @@ function printCreated(
 		// Shared-edge relaxes the zero-trust guarantee: rine's broker terminates TLS
 		// and holds the decrypted request in memory for an instant (never logged or
 		// stored) before forwarding it to your relay, which still verifies the HMAC
-		// and re-encrypts to your agent (at rest it stays hpke-v1).
+		// and re-encrypts to your agent (at rest it stays hpke-hybrid-v2).
 		console.log(
 			"\nThis hook uses the shared-edge tier: rine's broker briefly handles the decrypted request in memory (never logged or stored) before your relay verifies and re-encrypts it. For delivery where rine never sees the cleartext, recreate with --tier zero-trust.",
 		);

@@ -1,0 +1,53 @@
++ * rine - Acme Corp ----------------------------- org key +
+| [ All messages 7 ]                                       |
+| sales > billing    Invoice 4471 is ready f~        now + |
+| #ops - sales       Deploy finished on eu-1          5m + |
+|>sales > buyer@fj~  Quote accepted                13:30 + |
+| sales > buyer@fj~  No key copy for epoch 4~  yesterday ! |
+| #ops - billing     the sender's key could ~        Fri ? |
+| buyer@fj~ > sales  signature does not matc~     14 Oct x |
+| buyer@~ > billing  signed by a different a~   Sep 2025 x |
+|                                                          |
+|                                                          |
++----------------------------------------------------------+
+|sales 3f9a1c07  >  buyer@fjord21735 c41d77aa              |
+|2026-10-26 13:30:00 - 1:1 - + signature verified          |
+|# two different copies of this message were seen          |
+|2 hidden characters removed                               |
+|== message -----------------------------------------------|
+|| Quote accepted                                          |
+|                                                          |
++j/k move - enter open      * live - 5 s - 7 loaded - 1 gap+
+--- styles ---
+abbbbbbbcccbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.........a
+a.aaaaaaaaaaaaaaaaaa.......................................a
+a......ccc.....................................ccccccccc.d.a
+a.eeeeccc......................................ccccccccc.d.a
+abfffffgggfffffffffffffffffffffffffffffffffffffgggggggggfh.a
+a......ccc...........iiiiiiiiiiiiiiiiiiiiiiii..ccccccccc.i.a
+a.eeeeccc............cccccccccccccccccccccccc..ccccccccc.i.a
+a..........ccc.......cccccccccccccccccccccccc..ccccccccc.j.a
+a........ccc.........cccccccccccccccccccccccc..ccccccccc.j.a
+a..........................................................a
+a..........................................................a
+acccccccccccccccccccccccccccccccccccccccccccccccccccccccccca
+akkkkkcccccccccccccckkkkkkkkkkkkkkkkccccccccc..............a
+a............................d.............................a
+aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee..........a
+accccccccccccccccccccccccccc...............................a
+aaa.kkkkkkk.ccccccccccccccccccccccccccccccccccccccccccccccca
+acc........................................................a
+a..........................................................a
+abbbccccccccbbbbbccccc......d..............................a
+--- legend ---
+a "\u001b[0;96m"
+b "\u001b[0;1;96m"
+c "\u001b[0;90m"
+d "\u001b[0;92m"
+e "\u001b[0;95m"
+f "\u001b[0;1;7m"
+g "\u001b[0;1;7;90m"
+h "\u001b[0;1;7;92m"
+i "\u001b[0;33m"
+j "\u001b[0;91m"
+k "\u001b[0;1m"

@@ -33,7 +33,7 @@ import {
 	parseFacilitatorHeaders,
 	parseX402Payload,
 	refusalReceiptBody,
-	requireAuthenticPlaintext,
+	requireVerifiedPlaintext,
 	resolveFacilitatorConfig,
 	resolvePayeeRequirement,
 	sendReceipt,
@@ -43,7 +43,7 @@ import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printError, printJson } from "../output.js";
-import { reportFulfill } from "../x402-receipt.js";
+import { reportFulfill, reportRetryable } from "../x402-receipt.js";
 
 function collectHeader(v: string, acc: string[]): string[] {
 	acc.push(v);
@@ -160,7 +160,7 @@ export function registerFulfill(program: Command): void {
 					}
 					if (!agentKeysExist(configDir, payeeAgentId)) {
 						printError(
-							`No E2EE keys for agent ${payeeAgentId}. Run 'rine keys generate' first.`,
+							`No E2EE keys for agent ${payeeAgentId}. Run 'rine org recover' to restore this agent's keys.`,
 						);
 						process.exitCode = 1;
 						return;
@@ -188,20 +188,26 @@ export function registerFulfill(program: Command): void {
 						message.encrypted_payload,
 						client,
 						payerAgentId,
+						payeeAgentId,
+						message.created_at,
 					);
 					// A payment is only the payer's word when the payer signed it, and a
 					// structurally malformed one (no `accepted` / no signed authorization)
-					// cannot be acted on either. Both are typed, catchable refusals —
-					// thread a graceful payment-failed receipt so the payer reaches a
-					// terminal state, never a stack trace.
+					// cannot be acted on either. Both are typed refusals that thread a
+					// graceful payment-failed receipt, never a stack trace. A sender whose
+					// key could not be read is the exception: no receipt, thread stays open.
 					let pp: PaymentPayload;
 					try {
 						pp = parseX402Payload(
 							message.type,
-							requireAuthenticPlaintext(decrypted, payerAgentId, messageId),
+							requireVerifiedPlaintext(decrypted, payerAgentId, messageId),
 						) as PaymentPayload;
 					} catch (err) {
 						if (!(err instanceof X402Error)) throw err;
+						if (err.code === X402_ERROR.SENDER_UNVERIFIABLE) {
+							reportRetryable(Boolean(gOpts.json), err);
+							return;
+						}
 						const resealed = err.code === X402_ERROR.INAUTHENTIC_SENDER;
 						const sent = await sendReceipt({
 							client,
@@ -289,18 +295,12 @@ export function registerFulfill(program: Command): void {
 						outcome = await settleToReceipt(pp, resolved, facilitator);
 					} catch (err) {
 						if (err instanceof X402FacilitatorError) {
-							printError(
-								`Facilitator error${
-									err.status ? ` (${err.status})` : ""
-								}: ${err.message}`,
+							reportRetryable(
+								Boolean(gOpts.json),
+								err,
+								{ facilitator_status: err.status ?? null },
+								`Facilitator error${err.status ? ` (${err.status})` : ""}: ${err.message}`,
 							);
-							if (gOpts.json)
-								printJson({
-									status: "facilitator-error",
-									facilitator_status: err.status ?? null,
-									detail: err.message,
-								});
-							process.exitCode = 1;
 							return;
 						}
 						throw err;

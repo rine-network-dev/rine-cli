@@ -21,7 +21,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getOrCreateSenderKey = vi.fn();
 vi.mock("../src/commands/sender-key-ops.js", () => ({
 	getOrCreateSenderKey: (...a: unknown[]) => getOrCreateSenderKey(...a),
-	fetchAndIngestPendingSKDistributions: vi.fn(),
 }));
 
 const { registerMessages } = await import("../src/commands/messages.js");
@@ -44,6 +43,7 @@ interface GuardCall {
 let guardCalls: GuardCall[] = [];
 let thrown: unknown;
 let posts: string[] = [];
+let postedBodies: Record<string, unknown>[] = [];
 
 function makeGroup(
 	over: Record<string, unknown> = {},
@@ -76,8 +76,9 @@ function stubServer(group: Record<string, unknown>): void {
 		},
 	);
 	vi.spyOn(core.HttpClient.prototype, "post").mockImplementation(
-		async (path: string) => {
+		async (path: string, body?: unknown) => {
 			posts.push(path);
+			postedBodies.push(body as Record<string, unknown>);
 			return { id: "m1", conversation_id: "c1" };
 		},
 	);
@@ -105,15 +106,14 @@ beforeEach(() => {
 	localMlsState.clear();
 	guardCalls = [];
 	posts = [];
+	postedBodies = [];
 	thrown = undefined;
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "normalizeHandle").mockImplementation((h) => h);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
@@ -127,13 +127,17 @@ beforeEach(() => {
 			sender_signing_kid: `rine:${SENDER}`,
 		},
 	} as never);
-	vi.spyOn(core, "encryptMlsGroupMessage").mockResolvedValue({
-		encrypted_payload: "ENC(MLS)",
-		encryption_version: "mls-v1",
-		sender_signing_kid: `rine:${SENDER}`,
-	} as never);
-	vi.spyOn(core, "processMlsWelcomes").mockResolvedValue(undefined as never);
-	vi.spyOn(core, "syncMlsGroup").mockResolvedValue(undefined as never);
+	// The seal-and-post is rine-core's: its ordering, retry and recovery are
+	// tested there. This file pins the CLI side of the seam.
+	vi.spyOn(core, "sealAndPostMlsGroupMessage").mockImplementation(
+		async (_actor, _groupId, _payload, post) =>
+			post({
+				encrypted_payload: "ENC(MLS)",
+				encryption_version: "mls-v1",
+				sender_signing_kid: `rine:${SENDER}`,
+				escrow_fp: "ESCROW_FP",
+			} as never),
+	);
 	getOrCreateSenderKey.mockResolvedValue({
 		state: { __state: true },
 		groupId: GROUP_ID,
@@ -229,7 +233,7 @@ describe("rine send — the branch is the send predicate", () => {
 
 		await send();
 
-		expect(core.encryptMlsGroupMessage).toHaveBeenCalledTimes(1);
+		expect(core.sealAndPostMlsGroupMessage).toHaveBeenCalledTimes(1);
 		expect(getOrCreateSenderKey).not.toHaveBeenCalled();
 		expect(guardCalls[0]?.serverSaysMls).toBe(true);
 	});
@@ -284,95 +288,52 @@ describe("rine send — the branch is the send predicate", () => {
 		expect(guardCalls[0]?.serverSaysMls).toBe(true);
 	});
 });
-/**
- * The send path's MLS recovery asks about the group it is sending to.
- *
- * The second `processMlsWelcomes` in `encryptMlsWithRecovery` is UNCAUGHT,
- * unlike the pre-sync above it, so whatever refusal that pass raises aborts the
- * send. Left unscoped a pass answers with the first refusal whose bytes arrived
- * in it — and the server picks that order by picking the order of its own
- * welcomes response — so a substituted Welcome for an unrelated group would
- * abort a send that has nothing to do with it.
- *
- * The mock below is rine-core's own `pickRefusal` rule (`mls-ops-join.ts`):
- * scoped, the named group's refusal; unscoped, the first in the server's order.
- * That rule is MEASURED faithful against the real native core.
- *
- * The Python twin already scopes this path through `install_mls_state`
- * (`_mls/join.py`), so this closes a gap between the two stacks.
- */
-describe("rine send — the MLS recovery scopes its Welcome pass", () => {
-	const OTHER_GROUP_ID = "66666666-6666-6666-6666-666666666666";
-
-	/** The refusal the group substitution guard mints, as a pass raises it. */
-	function refusal(groupId: string): core.MlsWelcomeRefusedError {
-		return new core.MlsWelcomeRefusedError(
-			groupId,
-			"roster_uncorroborated",
-			`Refusing the MLS welcome for group ${groupId}`,
-		);
-	}
-
-	/** rine-core's `pickRefusal`, over a batch in the server's chosen order. */
-	function serverOrders(...batch: core.MlsWelcomeRefusedError[]) {
-		return async (
-			_configDir: string,
-			_agentId: string,
-			_client: unknown,
-			opts?: { forGroup?: string },
-		) => {
-			const chosen = opts?.forGroup
-				? batch.find((r) => r.groupId === opts.forGroup)
-				: batch[0];
-			if (chosen) throw chosen;
-			return { processed: 0, groupIds: [] };
-		};
-	}
-
-	beforeEach(() => {
-		// The recovery arm runs only when the first encrypt reports no local state.
-		vi.mocked(core.encryptMlsGroupMessage).mockRejectedValueOnce(
-			core.noMlsStateError(GROUP_ID),
-		);
-	});
-
-	it("send_when_recovering_and_another_groups_welcome_is_refused_then_the_send_still_lands", async () => {
-		vi.spyOn(core, "processMlsWelcomes").mockImplementation(
-			serverOrders(refusal(OTHER_GROUP_ID)) as never,
-		);
+describe("rine send — an MLS send goes through the core seal-and-post", () => {
+	it("send_when_group_is_mls_then_core_gets_the_actor_group_uuid_and_payload", async () => {
 		stubServer(makeGroup({ mls_group_id: "opaque-latch" }));
 
 		await send();
 
-		expect(posts).toEqual(["/messages"]);
-		expect(process.exitCode).toBeUndefined();
+		expect(core.sealAndPostMlsGroupMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ agentId: SENDER, configDir: CONFIG_DIR }),
+			GROUP_ID,
+			{ text: "hi group" },
+			expect.any(Function),
+		);
 	});
 
-	it("send_when_recovering_and_this_groups_welcome_is_refused_then_the_send_fails", async () => {
-		// The decoy is FIRST in the server's order, so an unscoped pass answers
-		// with it and this group's refusal never reaches the caller.
-		vi.spyOn(core, "processMlsWelcomes").mockImplementation(
-			serverOrders(refusal(OTHER_GROUP_ID), refusal(GROUP_ID)) as never,
-		);
+	it("send_when_group_is_mls_then_the_body_carries_the_sealed_fields_and_escrow_fp", async () => {
 		stubServer(makeGroup({ mls_group_id: "opaque-latch" }));
 
 		await send();
 
-		expect(core.isMlsWelcomeRefusedError(thrown)).toBe(true);
-		expect((thrown as core.MlsWelcomeRefusedError).groupId).toBe(GROUP_ID);
+		expect(postedBodies).toHaveLength(1);
+		expect(postedBodies[0]).toMatchObject({
+			encryption_version: "mls-v1",
+			escrow_fp: "ESCROW_FP",
+			to_handle: GROUP_HANDLE,
+		});
+	});
+
+	it("send_when_core_refuses_with_an_escrow_gap_then_nothing_is_posted", async () => {
+		stubServer(makeGroup({ mls_group_id: "opaque-latch" }));
+		vi.mocked(core.sealAndPostMlsGroupMessage).mockRejectedValue(
+			new core.EscrowGapError(GROUP_ID, 7, "too_many_leaves" as never),
+		);
+
+		await send();
+
 		expect(posts).toEqual([]);
+		expect(core.isEscrowGapError(thrown)).toBe(true);
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("send_when_recovering_names_the_group_being_sent_to", async () => {
-		stubServer(makeGroup({ mls_group_id: "opaque-latch" }));
+	it("send_when_the_group_is_sender_key_then_no_mls_seal_runs", async () => {
+		stubServer(makeGroup());
 
 		await send();
 
-		// Two passes run: the pre-sync, deliberately unscoped because it is caught,
-		// and the recovery, which is not caught and must name this group.
-		expect(vi.mocked(core.processMlsWelcomes).mock.calls[1]?.[3]).toEqual({
-			forGroup: GROUP_ID,
-		});
+		expect(core.sealAndPostMlsGroupMessage).not.toHaveBeenCalled();
+		expect(postedBodies[0]).not.toHaveProperty("escrow_fp");
 	});
 });

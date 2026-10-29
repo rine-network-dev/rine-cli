@@ -1,0 +1,54 @@
+╭ ◆ rine · Acme Corp ───────────────────────────── org key ╮
+│ [ All messages 7 ]                                       │
+│ sales → billing    Invoice 4471 is ready f…        now ✓ │
+│ #ops · sales       Deploy finished on eu-1          5m ✓ │
+│▌sales → buyer@fj…  Quote accepted                13:30 ✓ │
+│ sales → buyer@fj…  No key copy for epoch 4…  yesterday ! │
+│ #ops · billing     the sender's key could …        Fri ? │
+│ buyer@fj… → sales  signature does not matc…     14 Oct ✗ │
+│ buyer@… → billing  signed by a different a…   Sep 2025 ✗ │
+│                                                          │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│sales 3f9a1c07  →  buyer@fjord21735 c41d77aa              │
+│2026-10-26 13:30:00 · 1:1 · ✓ signature verified          │
+│≠ two different copies of this message were seen          │
+│2 hidden characters removed                               │
+│━━ message ───────────────────────────────────────────╌╌┄┄│
+│┃ Quote accepted                                          │
+│                                                          │
+╰j/k move · enter open      ● live · 5 s · 7 loaded · 1 gap╯
+--- styles ---
+abcbccccdddbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.........a
+a.aaaaaaaaaaaaaaaaaa.......................................a
+a......ddd.....................................ddddddddd.e.a
+a.ffffddd......................................ddddddddd.e.a
+abggggghhhggggggggggggggggggggggggggggggggggggghhhhhhhhhgi.a
+a......ddd...........jjjjjjjjjjjjjjjjjjjjjjjj..ddddddddd.j.a
+a.ffffddd............dddddddddddddddddddddddd..ddddddddd.j.a
+a..........ddd.......dddddddddddddddddddddddd..ddddddddd.k.a
+a........ddd.........dddddddddddddddddddddddd..ddddddddd.k.a
+a..........................................................a
+a..........................................................a
+adddddddddddddddddddddddddddddddddddddddddddddddddddddddddda
+alllllddddddddddddddllllllllllllllllddddddddd..............a
+a............................e.............................a
+affffffffffffffffffffffffffffffffffffffffffffffff..........a
+addddddddddddddddddddddddddd...............................a
+aaa.lllllll.ddddddddddddddddddddddddddddddddddddddddddddddda
+add........................................................a
+a..........................................................a
+abbbddddddddbbbbbddddd......e..............................a
+--- legend ---
+a "\u001b[0;38;2;0;224;200m"
+b "\u001b[0;1;38;2;0;224;200m"
+c "\u001b[0;1;38;2;51;245;221m"
+d "\u001b[0;38;2;107;114;128m"
+e "\u001b[0;38;2;138;217;188m"
+f "\u001b[0;38;2;187;154;247m"
+g "\u001b[0;1;7m"
+h "\u001b[0;1;7;38;2;107;114;128m"
+i "\u001b[0;1;7;38;2;138;217;188m"
+j "\u001b[0;38;2;255;184;20m"
+k "\u001b[0;38;2;247;118;142m"
+l "\u001b[0;1m"

@@ -25,6 +25,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
 import * as outputModule from "../src/output.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 const CONFIG_DIR = "/tmp/test-rine-group-create-mls";
 const API_URL = "https://test.rine.network";
@@ -60,6 +61,7 @@ const ADMISSION = {
 	commits: 1,
 	added: 1,
 	outcomes: [{ agentId: AGENT_ID, status: "added" as const }],
+	escrow: NO_ESCROW,
 };
 
 let printed: string[];
@@ -103,10 +105,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core.HttpClient.prototype, "post").mockResolvedValue(preInitRow());
 	// The confirming re-read is refused. `refresh` swallows that deliberately —

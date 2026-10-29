@@ -17,7 +17,13 @@ import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printError, printJson, printTable, printText } from "../output.js";
-import { admitToMls, mlsFailureText } from "./group-mls.js";
+import {
+	type MlsAdmissionFailure,
+	admitToMls,
+	failedAdmission,
+	withAdmission,
+} from "./group-mls-admission.js";
+import { mlsFailureText } from "./group-mls-failure.js";
 import { admissionOutcomeRows, inviteRow, requestRow } from "./group-rows.js";
 import { GROUP_REFERENCE_HELP, groupTarget } from "./group-target.js";
 
@@ -280,12 +286,13 @@ export function registerGroupRequests(program: Command, group: Command): void {
 					// member yet, and widening this to "anything that is not denied"
 					// would seat an agent that never consented — the hole that column
 					// exists to close. `resume-admission` seats them once they join.
-					if (data.status === "approved" && applicantId) {
-						await seatApplicant(ctx, groupId, applicantId);
-					}
+					const admission =
+						data.status === "approved" && applicantId
+							? await seatApplicant(ctx, groupId, applicantId)
+							: null;
 
 					if (ctx.gOpts.json) {
-						printJson(data);
+						printJson(withAdmission(data, admission));
 					} else {
 						const said = voteOutcomeSentence(data.status);
 						printText(
@@ -298,16 +305,19 @@ export function registerGroupRequests(program: Command, group: Command): void {
 		);
 }
 
-/** Best-effort MLS add for a newly approved applicant; never fails the vote. */
+/**
+ * Best-effort MLS add for a newly approved applicant; never fails the vote. The
+ * failure comes back as data so `--json` can report it, as `group invite` does.
+ */
 async function seatApplicant(
 	ctx: ActionContext,
 	groupId: string,
 	applicantId: string,
-): Promise<void> {
+): Promise<MlsAdmissionResult | MlsAdmissionFailure | null> {
 	try {
 		const target = (await ctx.client.get(`/groups/${groupId}`)) as GroupRead;
 		const actingId = await ctx.actingAgent();
-		await admitToMls(
+		return await admitToMls(
 			ctx.client,
 			ctx.configDir,
 			actingId,
@@ -317,10 +327,6 @@ async function seatApplicant(
 			ctx.gOpts.json,
 		);
 	} catch (err) {
-		if (!ctx.gOpts.json) {
-			printText(
-				`Warning: MLS add-member failed: ${mlsFailureText(err, groupId)}`,
-			);
-		}
+		return failedAdmission(err, groupId, ctx.gOpts.json);
 	}
 }

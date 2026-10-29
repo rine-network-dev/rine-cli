@@ -1,9 +1,9 @@
 import {
-	type GroupRead,
 	ACTING_AGENT_HEADER,
 	describeMlsRecovery,
 	groupMlsInitInFlight,
 	isMlsResyncUnavailable,
+	isMlsRotatedLeaf,
 	mlsInitInFlightSync,
 	recoverGroup,
 } from "@rine-network/core";
@@ -11,7 +11,7 @@ import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printError, printJson, printText } from "../output.js";
-import { mlsFailureText } from "./group-mls.js";
+import { mlsFailureText } from "./group-mls-failure.js";
 import { CLI_UNFOUNDED_REPAIR } from "./group-rows.js";
 import { GROUP_REFERENCE_HELP, groupTarget } from "./group-target.js";
 
@@ -43,29 +43,20 @@ export function registerGroupSync(program: Command, group: Command): void {
 				// One read, not two: the ladder's UUID rung IS `GET /groups/{id}`.
 				const { row: target } = await groupTarget(ctx, ref);
 				// 🔴 Everything this command prints names the group the way the row
-				// spells it, never the way the caller did — the same rule the
-				// init-in-flight guard below already followed, now that a caller can
-				// spell it three ways.
+				// spells it (handle, else id), never the way the caller typed it.
+				// It is also the identifier `recoverGroup`'s own throw and the
+				// Python twin format, so the guard below says what the throw it
+				// bypasses would have said.
 				const label = target.handle ?? target.id;
-				// 🔴 Refused on the row this command already fetched, before any
-				// work, and with exit 2 — the shape `rine group resume-admission`
-				// uses for the same class of answer (`group-requests.ts`). A group
-				// between its MLS init and the latch has neither recovery: there is
-				// no epoch chain to catch up with and no sender keys to install, and
-				// the server clears the state itself within minutes. Exit 2 across
-				// this CLI means "the command declined to act", never "no retry
-				// helps", and 2 is what `@rine-network/cli` published for this case.
-				// `recoverGroup` keeps its own throw — that is the SDK-level
-				// contract, and every other TypeScript surface still reads it.
-				//
-				// 🔴 `target.handle ?? target.id`, the identifier the throw this
-				// guard bypasses formats (`group-recovery.ts`), and never the
-				// raw argument: the Python twin formats the row's handle, so
-				// echoing the UUID here is one event printing two sentences
-				// depending on which SDK a surface wraps. Bypassing the throw
-				// must not bypass what the throw said.
+				// 🔴 A group between its MLS init and the latch has neither
+				// recovery (no epoch chain to catch up with, no sender keys to
+				// install) and the server clears that state within minutes. It is
+				// refused on the row already fetched, before any work, with exit 2:
+				// "the command declined to act", the shape `rine group
+				// resume-admission` uses for the same class of answer.
+				// `recoverGroup` keeps its own throw for the SDK-level callers.
 				if (groupMlsInitInFlight(target)) {
-					printError(mlsInitInFlightSync(target.handle ?? target.id));
+					printError(mlsInitInFlightSync(label));
 					process.exitCode = 2;
 					return;
 				}
@@ -91,10 +82,12 @@ export function registerGroupSync(program: Command, group: Command): void {
 					}
 				} catch (err) {
 					printError(mlsFailureText(err, label));
-					// A group this agent cannot recover from at all is a different
-					// answer than a recovery that failed: the remedy is an admin's,
-					// not a retry, so it gets its own exit code.
-					process.exitCode = isMlsResyncUnavailable(err) ? 2 : 1;
+					// A group this agent cannot recover from at all (no local state, or
+					// a seat on a key it has since rotated) is a different answer than
+					// a recovery that failed: the remedy is a member's, not a retry, so
+					// it gets its own exit code.
+					process.exitCode =
+						isMlsResyncUnavailable(err) || isMlsRotatedLeaf(err) ? 2 : 1;
 				}
 			}),
 		);

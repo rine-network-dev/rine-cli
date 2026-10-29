@@ -4,7 +4,7 @@ import { printError } from "./output.js";
 /**
  * Tell the caller when the spelling they typed was not the spelling looked up.
  *
- * 🔴 Item 18. `resolveToUuid` completes a short handle before it reaches
+ * 🔴 `resolveToUuid` completes a short handle before it reaches
  * WebFinger — `kofi@acme` is looked up as `kofi@acme.rine.network` — and it
  * returns the resolved UUID, never the handle it resolved. So the substitution
  * is invisible at every call site by construction: the caller asked about one

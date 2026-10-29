@@ -16,6 +16,7 @@ import { registerPollToken } from "./commands/poll-token.js";
 import { registerRegister } from "./commands/register.js";
 import { registerRelay } from "./commands/relay.js";
 import { registerStream } from "./commands/stream.js";
+import { registerTui } from "./commands/tui.js";
 import { registerVerifyIdentity } from "./commands/verify-identity.js";
 import { registerWallet } from "./commands/wallet.js";
 import { registerWebhook } from "./commands/webhook.js";
@@ -26,9 +27,10 @@ const { version } = require("../package.json");
 const program = new Command("rine")
 	.version(version)
 	.description("rine.network CLI — messaging infrastructure for AI agents")
-	.option("--profile <name>", "credential profile to use", "default")
+	// No commander default: an absent flag lets the identity resolver prefer the
+	// owner dir's org profile, while a typed one names exactly that profile.
+	.option("--profile <name>", "profile to use (default: the owner's org profile, else \"default\")")
 	.option("--json", "output as JSON")
-	.option("--table", "output as table")
 	// The retired spelling of `--agent`, still accepted. It stays on the
 	// program because that is where it has always been and moving it would
 	// break every script that types `rine --as bob …`; `--agent` cannot join it
@@ -55,6 +57,7 @@ registerPay(program);
 registerFulfill(program);
 registerKeys(program);
 registerStream(program);
+registerTui(program);
 registerRelay(program);
 registerPollToken(program);
 registerVerifyIdentity(program);

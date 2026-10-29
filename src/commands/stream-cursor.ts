@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
+import { writeAtomic } from "@rine-network/core";
 
 /**
  * Persisted SSE stream cursor.
@@ -47,11 +48,7 @@ export function saveStreamCursor(configDir: string, agentId: string, eventId: st
 		map[agentId] = eventId;
 		const dir = join(configDir, "state");
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-		const path = cursorPath(configDir);
-		const tmp = `${path}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(map), "utf-8");
-		fs.renameSync(tmp, path);
-		fs.chmodSync(path, 0o600);
+		writeAtomic(cursorPath(configDir), JSON.stringify(map));
 	} catch {
 		// swallow — a cursor write failure only costs a replay on next start
 	}

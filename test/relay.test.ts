@@ -86,7 +86,6 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		resolveApiUrl: vi.fn(() => "http://localhost:7001"),
 		fetchAgents: vi.fn(async () => [{ id: AGENT_ID, name: "bot" }]),
 		resolveAgent: vi.fn(async () => ({ agentId: AGENT_ID })),
-		getOrRefreshToken: vi.fn(async () => "fake-token"),
 		formatError: vi.fn((e: unknown) => String(e)),
 		loadHookSecret: (...a: unknown[]) => mockLoadHookSecret(...(a as [])),
 		agentKeysExist: (...a: unknown[]) => mockAgentKeysExist(...(a as [])),
@@ -103,7 +102,7 @@ vi.mock("@rine-network/core", async (importOriginal) => {
 		// from the server hostname (the second-to-last label before `.hook.…`).
 		agentLabel: orig.agentLabel,
 		// The mux tunnel + local TLS listener are re-exported from the rine-core
-		// package ROOT (src/index.ts → export * from "./funnel/index.js"), so the
+		// package ROOT (src/index.ts names them from "./funnel/index.js"), so the
 		// relay command imports them from "@rine-network/core" — mock them here.
 		connectTunnel: (...a: unknown[]) =>
 			mockConnectTunnel(...(a as [TunnelArgs])),
@@ -141,7 +140,9 @@ vi.mock("../src/action.js", () => ({
 			post: vi.fn(),
 		},
 		profileName: "default",
-		entry: { client_id: "c", client_secret: "s" },
+		dirs: { configDir: "/fake/config", ownerDir: "/fake/owner" },
+		auth: undefined,
+		token: vi.fn(async () => "fake-token"),
 	})),
 }));
 
@@ -477,6 +478,31 @@ describe("rine relay — lifecycle events", () => {
 		expect(reconnect).toBeDefined();
 		expect(reconnect?.data.reason).toBe("server_close");
 		expect(reconnect?.data.backoff_ms).toBe(0);
+	});
+
+	it("keeps one SIGINT listener across reconnects", async () => {
+		const reconnects = 12;
+		let calls = 0;
+		let listenersAtStop = 0;
+		mockConnectTunnel.mockImplementation(async () => {
+			calls++;
+			orchestrationOrder.push("tunnel");
+			if (calls > reconnects) {
+				listenersAtStop = sigintListeners.length;
+				Promise.resolve().then(() => fireSigint());
+			}
+			return {
+				close: vi.fn(),
+				onClose: (cb: (c: TunnelClose) => void) =>
+					cb({ code: 1000, clean: true }),
+			};
+		});
+		const program = makeProgram({});
+		await program.parseAsync(["node", "rine", "relay", "--agent", AGENT_ID]);
+
+		expect(calls).toBe(reconnects + 1);
+		expect(listenersAtStop).toBe(1);
+		expect(process.exitCode).toBe(0);
 	});
 
 	it("an ABNORMAL server close backs off with a jittered delay", async () => {

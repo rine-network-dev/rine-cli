@@ -6,12 +6,34 @@ import * as outputModule from "../src/output.js";
 import * as agentFormatModule from "../src/agent-format.js";
 import { registerOnboard } from "../src/commands/onboard.js";
 
-// Suppress console output during tests
+const CONFIG_DIR = "/tmp/test-rine";
+const OWNER_DIR = "/tmp/owner";
+const PHRASE_PATH = "/tmp/owner/recovery-phrase.txt";
+
+/** Everything the command wrote to a screen, in order. */
+let captured: string[] = [];
+
+function capturedText(): string {
+	return captured.join("\n");
+}
+
+// Capture console output during tests instead of letting it reach the runner.
 beforeEach(() => {
-	vi.spyOn(console, "log").mockImplementation(() => {});
-	vi.spyOn(console, "error").mockImplementation(() => {});
-	vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-	vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+	captured = [];
+	vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+		captured.push(args.map(String).join(" "));
+	});
+	vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+		captured.push(args.map(String).join(" "));
+	});
+	vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+		captured.push(String(chunk));
+		return true;
+	});
+	vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+		captured.push(String(chunk));
+		return true;
+	});
 });
 
 afterEach(() => {
@@ -47,9 +69,10 @@ const MOCK_AGENT: core.AgentRead = {
 	poll_url: "https://rine.network/poll/token",
 };
 
-const MOCK_REG_RESULT = {
+const MOCK_REG_RESULT: core.RegistrationResult = {
 	org_id: "org-uuid",
-	client_id: "client-uuid",
+	org_words: "w1 w2 w3 w4 w5 w6 w7 w8",
+	phrase_path: PHRASE_PATH,
 };
 
 const MOCK_ORG = { id: "org-uuid", slug: "test-org", name: "Test Org" };
@@ -57,6 +80,15 @@ const MOCK_AGENTS_LIST: core.ListResponse<core.AgentRead> = {
 	items: [MOCK_AGENT],
 	total: 1,
 };
+
+/** The dirs the command resolves, and the identity state of a fresh owner dir. */
+function mockFreshPath(): void {
+	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue(OWNER_DIR);
+	vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
+	vi.spyOn(core, "validateSlug").mockReturnValue(true);
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
+}
 
 /**
  * An onboard program wired the way `main.ts` wires one.
@@ -84,10 +116,8 @@ function makeProgram(
 
 describe("onboard command — invalid slug", () => {
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
+		mockFreshPath();
 		vi.spyOn(core, "validateSlug").mockReturnValue(false);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
 	});
 
 	it("prints error and sets exitCode=1 without calling registration", async () => {
@@ -112,10 +142,7 @@ describe("onboard command — invalid slug", () => {
 // onboard run from a stale script stops before it registers an org.
 describe("onboard command — the retired --agent spelling is gone", () => {
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "validateSlug").mockReturnValue(true);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
+		mockFreshPath();
 	});
 
 	const refusingProgram = () => makeProgram({}, { refusing: true });
@@ -163,17 +190,18 @@ describe("onboard command — already registered (idempotency)", () => {
 	let mockClient: { get: ReturnType<typeof vi.fn> };
 
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "validateSlug").mockReturnValue(true);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-			client_id: "existing-id",
-			client_secret: "existing-secret",
+		mockFreshPath();
+		// A resolvable identity is the guard: this owner dir already holds a root.
+		vi.spyOn(core, "resolveAuth").mockReturnValue({
+			signer: {} as core.ResolvedAuth["signer"],
+			orgId: "org-uuid",
+			cacheDir: OWNER_DIR,
 		});
 
 		mockClient = { get: vi.fn() };
 		mockClient.get.mockImplementation((path: string) => {
-			if (path === "/org") return Promise.resolve(MOCK_ORG);
+			if (path === "/whoami")
+				return Promise.resolve({ org: MOCK_ORG, principal: {}, agents: [] });
 			if (path === "/agents") return Promise.resolve(MOCK_AGENTS_LIST);
 			return Promise.reject(new Error(`Unknown path: ${path}`));
 		});
@@ -181,11 +209,13 @@ describe("onboard command — already registered (idempotency)", () => {
 		vi.spyOn(actionModule, "createClient").mockResolvedValue({
 			client: mockClient as unknown as core.HttpClient,
 			profileName: "default",
-			entry: { client_id: "existing-id", client_secret: "existing-secret" },
+			dirs: { configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
+			auth: undefined,
+			token: async () => "token",
 		});
 	});
 
-	it("fetches /org and /agents, prints info in text mode, skips registration", async () => {
+	it("fetches /whoami and /agents, prints info in text mode, skips registration", async () => {
 		const printTableSpy = vi
 			.spyOn(outputModule, "printTable")
 			.mockImplementation(() => {});
@@ -196,7 +226,7 @@ describe("onboard command — already registered (idempotency)", () => {
 		const program = makeProgram({ json: false });
 		await program.parseAsync(BASE_ARGS);
 
-		expect(mockClient.get).toHaveBeenCalledWith("/org");
+		expect(mockClient.get).toHaveBeenCalledWith("/whoami");
 		expect(mockClient.get).toHaveBeenCalledWith("/agents");
 		expect(printTableSpy).toHaveBeenCalledWith(
 			expect.arrayContaining([
@@ -240,10 +270,7 @@ describe("onboard command — happy path (text mode)", () => {
 	let mockClient: { get: ReturnType<typeof vi.fn> };
 
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "validateSlug").mockReturnValue(true);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
+		mockFreshPath();
 		vi.spyOn(core, "performRegistration").mockResolvedValue(MOCK_REG_RESULT);
 		vi.spyOn(core, "performAgentCreation").mockResolvedValue(MOCK_AGENT);
 
@@ -251,11 +278,13 @@ describe("onboard command — happy path (text mode)", () => {
 		vi.spyOn(actionModule, "createClient").mockResolvedValue({
 			client: mockClient as unknown as core.HttpClient,
 			profileName: "default",
-			entry: undefined,
+			dirs: { configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
+			auth: undefined,
+			token: async () => "token",
 		});
 	});
 
-	it("calls performRegistration with correct params", async () => {
+	it("calls performRegistration with the resolved custody dirs", async () => {
 		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
 		vi.spyOn(agentFormatModule, "toAgentRow").mockReturnValue({
 			ID: MOCK_AGENT.id,
@@ -270,7 +299,7 @@ describe("onboard command — happy path (text mode)", () => {
 
 		expect(core.performRegistration).toHaveBeenCalledWith(
 			"https://test.rine.network",
-			"/tmp/test-rine",
+			{ configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
 			"default",
 			{ email: "test@example.com", slug: "test-org", name: "Test Org" },
 			expect.any(Function),
@@ -292,7 +321,7 @@ describe("onboard command — happy path (text mode)", () => {
 
 		expect(core.performAgentCreation).toHaveBeenCalledWith(
 			mockClient,
-			"/tmp/test-rine",
+			{ configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
 			"default",
 			expect.objectContaining({ name: "my-agent" }),
 		);
@@ -326,16 +355,24 @@ describe("onboard command — happy path (text mode)", () => {
 		);
 		expect(printTableSpy).toHaveBeenCalledWith([agentRow]);
 	});
+
+	it("prints the org verification words", async () => {
+		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
+
+		const program = makeProgram({ json: false });
+		await program.parseAsync(BASE_ARGS);
+
+		expect(capturedText()).toContain(
+			`Org verification words: ${MOCK_REG_RESULT.org_words}`,
+		);
+	});
 });
 
 describe("onboard command — happy path (JSON mode)", () => {
 	let mockClient: { get: ReturnType<typeof vi.fn> };
 
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "validateSlug").mockReturnValue(true);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
+		mockFreshPath();
 		vi.spyOn(core, "performRegistration").mockResolvedValue(MOCK_REG_RESULT);
 		vi.spyOn(core, "performAgentCreation").mockResolvedValue(MOCK_AGENT);
 
@@ -343,11 +380,13 @@ describe("onboard command — happy path (JSON mode)", () => {
 		vi.spyOn(actionModule, "createClient").mockResolvedValue({
 			client: mockClient as unknown as core.HttpClient,
 			profileName: "default",
-			entry: undefined,
+			dirs: { configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
+			auth: undefined,
+			token: async () => "token",
 		});
 	});
 
-	it("calls printJson with org_id, client_id, agent, poll_url, config_dir", async () => {
+	it("calls printJson with org_id, org_words, recovery_phrase_file, agent, poll_url, config_dir, owner_dir", async () => {
 		const printJsonSpy = vi
 			.spyOn(outputModule, "printJson")
 			.mockImplementation(() => {});
@@ -357,7 +396,8 @@ describe("onboard command — happy path (JSON mode)", () => {
 
 		expect(printJsonSpy).toHaveBeenCalledWith({
 			org_id: MOCK_REG_RESULT.org_id,
-			client_id: MOCK_REG_RESULT.client_id,
+			org_words: MOCK_REG_RESULT.org_words,
+			recovery_phrase_file: MOCK_REG_RESULT.phrase_path,
 			agent: MOCK_AGENT,
 			// The comparison ships as its own field, both values and a
 			// boolean, beside the agent rather than folded into it. This config
@@ -372,8 +412,20 @@ describe("onboard command — happy path (JSON mode)", () => {
 			},
 			poll_url: MOCK_AGENT.poll_url,
 			identity: undefined,
-			config_dir: "/tmp/test-rine",
+			identity_error: undefined,
+			config_dir: CONFIG_DIR,
+			owner_dir: OWNER_DIR,
 		});
+	});
+
+	it("emits recovery_phrase_file and never a client_id", async () => {
+		const program = makeProgram({ json: true });
+		await program.parseAsync(BASE_ARGS);
+
+		const text = capturedText();
+		expect(text).toContain("recovery_phrase_file");
+		expect(text).toContain(MOCK_REG_RESULT.phrase_path);
+		expect(text).not.toContain("client_id");
 	});
 
 	it("does not call printTable in json mode", async () => {
@@ -389,12 +441,58 @@ describe("onboard command — happy path (JSON mode)", () => {
 	});
 });
 
+describe("onboard command — the recovery phrase never leaks", () => {
+	const PHRASE =
+		"abandon ability able about above absent absorb abstract absurd abuse access accident " +
+		"account achieve acid acoustic acquire across act action actor actress actual";
+
+	beforeEach(() => {
+		mockFreshPath();
+		vi.spyOn(core, "performRegistration").mockResolvedValue(MOCK_REG_RESULT);
+		vi.spyOn(core, "performAgentCreation").mockResolvedValue(MOCK_AGENT);
+		vi.spyOn(core, "readOwnerPhrase").mockReturnValue(PHRASE);
+		vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
+		vi.spyOn(actionModule, "createClient").mockResolvedValue({
+			client: { get: vi.fn() } as unknown as core.HttpClient,
+			profileName: "default",
+			dirs: { configDir: CONFIG_DIR, ownerDir: OWNER_DIR },
+			auth: undefined,
+			token: async () => "token",
+		});
+	});
+
+	it("never prints the words when stdout is not a TTY", async () => {
+		const original = process.stdout.isTTY;
+		process.stdout.isTTY = false;
+		try {
+			const program = makeProgram({ json: false });
+			await program.parseAsync(BASE_ARGS);
+		} finally {
+			process.stdout.isTTY = original;
+		}
+
+		expect(capturedText()).not.toContain(PHRASE);
+		expect(capturedText()).toContain(PHRASE_PATH);
+	});
+
+	it("prints the words exactly once on a terminal outside --json", async () => {
+		const original = process.stdout.isTTY;
+		process.stdout.isTTY = true;
+		try {
+			const program = makeProgram({ json: false });
+			await program.parseAsync(BASE_ARGS);
+		} finally {
+			process.stdout.isTTY = original;
+		}
+
+		const occurrences = capturedText().split(PHRASE).length - 1;
+		expect(occurrences).toBe(1);
+	});
+});
+
 describe("onboard command — error handling", () => {
 	beforeEach(() => {
-		vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
-		vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-		vi.spyOn(core, "validateSlug").mockReturnValue(true);
-		vi.spyOn(core, "getCredentialEntry").mockReturnValue(undefined);
+		mockFreshPath();
 	});
 
 	it("handles error from performRegistration via withErrorHandler", async () => {

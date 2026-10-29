@@ -63,7 +63,7 @@ const MESSAGE = {
 	to_agent_id: AGENT_ID,
 	group_id: null,
 	encrypted_payload: "AABBCCDD-ciphertext",
-	encryption_version: "hpke-hybrid-v1",
+	encryption_version: "hpke-hybrid-v2",
 	created_at: "2026-09-11T12:00:00Z",
 };
 
@@ -82,10 +82,8 @@ beforeEach(() => {
 	vi.spyOn(outputModule, "printError").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine-peek");
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, handle: "bot@org.rine.network" } as never,

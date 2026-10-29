@@ -20,7 +20,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getOrCreateSenderKey = vi.fn();
 vi.mock("../src/commands/sender-key-ops.js", () => ({
 	getOrCreateSenderKey: (...a: unknown[]) => getOrCreateSenderKey(...a),
-	fetchAndIngestPendingSKDistributions: vi.fn(),
 }));
 
 const { registerMessages } = await import("../src/commands/messages.js");
@@ -98,10 +97,8 @@ beforeEach(() => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "normalizeHandle").mockImplementation((h) => h);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
@@ -206,17 +203,14 @@ describe("rine send --to a sigiled group reference with no org half", () => {
 	it("keeps a bare name an AGENT, unchanged", async () => {
 		// No sigil and no at-sign. This must NOT become a group send: no group
 		// is resolved, and the bare word goes out as `to_agent_id` exactly as it
-		// always has. `messages.ts`'s `--to` help says so and stays true.
+		// always has. `messages-send.ts`'s `--to` help says so and stays true.
 		//
-		// The DM arm is only reachable with its own two mocks — which is itself
+		// The DM arm is only reachable with its own mock — which is itself
 		// the assertion: reaching them at all proves the bare word took the
 		// AGENT branch and not the group one.
-		vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
-			encryption: "RECIPIENT-X25519",
-		} as never);
-		vi.spyOn(core, "encryptMessage").mockResolvedValue({
+		vi.spyOn(core, "sealForAgent").mockResolvedValue({
 			encrypted_payload: "ENC(DM)",
-			encryption_version: "hpke-hybrid-v1",
+			encryption_version: "hpke-hybrid-v2",
 			sender_signing_kid: `rine:${SENDER}`,
 		} as never);
 
@@ -231,7 +225,7 @@ describe("rine send --to a sigiled group reference with no org half", () => {
 	});
 });
 
-// ── Item 17 — the help advertises the spelling the block above proves ─────
+// ── the help advertises the spelling the block above proves ───────────────
 //
 // The three tests above are the whole justification for this one: `#dev-401`
 // resolves today, and `--to`'s help did not say so. The help text is a

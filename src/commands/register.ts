@@ -1,16 +1,19 @@
 import type { Command } from "commander";
-import { withErrorHandler } from "../action.js";
+import { resolveDirs, withErrorHandler } from "../action.js";
 import {
+	DEFAULT_PROFILE,
 	performRegistration,
 	resolveApiUrl,
-	resolveConfigDir,
 } from "@rine-network/core";
-import { printError, printJson, printSuccess } from "../output.js";
+import { announcePhrase } from "../phrase-display.js";
+import { printJson, printSuccess } from "../output.js";
 
 export function registerRegister(program: Command): void {
 	program
 		.command("register")
-		.description("Register a new organization (two-step PoW flow)")
+		.description(
+			"Register a new organization (two-step PoW flow). Writes the org root key and recovery phrase to the owner dir",
+		)
 		.requiredOption("--email <email>", "Email address")
 		.requiredOption("--name <name>", "Organization name")
 		.requiredOption("--slug <slug>", "Organization slug")
@@ -18,8 +21,8 @@ export function registerRegister(program: Command): void {
 			withErrorHandler(
 				program,
 				async (gOpts, opts: { email: string; name: string; slug: string }) => {
-					const profile = gOpts.profile ?? "default";
-					const configDir = resolveConfigDir();
+					const profile = gOpts.profile ?? DEFAULT_PROFILE;
+					const dirs = resolveDirs();
 					const apiUrl = resolveApiUrl();
 
 					// Consent notice (stderr, non-blocking)
@@ -30,9 +33,9 @@ export function registerRegister(program: Command): void {
 					);
 
 					const progressStream = gOpts.json ? process.stderr : process.stdout;
-					const data = await performRegistration(
+					const reg = await performRegistration(
 						apiUrl,
-						configDir,
+						dirs,
 						profile,
 						{ email: opts.email, slug: opts.slug, name: opts.name },
 						(pct) => {
@@ -41,11 +44,23 @@ export function registerRegister(program: Command): void {
 					);
 					progressStream.write("\rSolving PoW challenge: 100%\n");
 
+					// The one place the words reach a screen, and only on a terminal.
+					announcePhrase({
+						ownerDir: dirs.ownerDir,
+						phrasePath: reg.phrase_path,
+						json: gOpts.json,
+					});
+
 					if (gOpts.json) {
-						printJson(data);
+						printJson({
+							org_id: reg.org_id,
+							org_words: reg.org_words,
+							recovery_phrase_file: reg.phrase_path,
+						});
 					} else {
 						printSuccess(`Registered '${opts.name}' (${opts.slug})`);
-						console.log("Credentials saved to .rine/credentials.json");
+						console.log(`Org id: ${reg.org_id}`);
+						console.log(`Org verification words: ${reg.org_words}`);
 						console.log(
 							"Next: create an agent with 'rine agent create --name <agent-name>'",
 						);

@@ -7,8 +7,11 @@ import {
 	type MlsAdmissionResult,
 	type RenderableGroup,
 	type UnfoundedGroupRepair,
+	type VoteEligibilityFallbacks,
+	describeVoteEligibility,
 	groupAdmissionSkipSentence,
 	groupEncryption,
+	impliedVoteEligibilityReason,
 	mlsAdmissionSkipSentence,
 } from "@rine-network/core";
 import type { AgentHandles } from "./own-agents.js";
@@ -201,39 +204,27 @@ export function memberRow(m: GroupMemberRead): Record<string, unknown> {
  * request a member filed on its behalf.
  *
  * A server that predates the electorate sends no reason at all, and the one its
- * behaviour implies is read off `status` — the same derivation the ts-SDK's
- * schema and the Python `vote_eligibility_reason` make. Not a flat
+ * behaviour implies is read off `status` by core's
+ * `impliedVoteEligibilityReason`, as the ts-SDK's schema does. Not a flat
  * `electorate_not_recorded`: that is right for a pending request and wrong for
  * an **invitation**, which nobody votes on and which `POST …/vote` answers 422
  * for, so the row would have told the operator "you can vote" about the one
  * population that cannot. A reason this build predates renders as itself rather
  * than as a guess about whether the vote would count.
+ *
+ * The clauses are core's (`describeVoteEligibility`); a table cell drops an
+ * unnamed ballot rather than dashing it.
  */
 export function voteEligibilityClause(r: JoinRequestRead): string {
 	const reason =
-		r.you_may_vote_reason ??
-		(r.status === "pending" ? "electorate_not_recorded" : "not_pending");
-	switch (reason) {
-		case "in_electorate":
-			return "you can vote";
-		case "electorate_not_recorded":
-			return "you can vote (filed before the electorate was recorded; any member may)";
-		case "not_in_electorate":
-			return "you cannot vote: you were not in the group when this was filed";
-		case "already_voted":
-			return `you already voted ${r.your_vote ?? ""}`.trimEnd();
-		case "electorate_empty":
-			return "nobody eligible is still in the group";
-		case "bar_unreachable":
-			return "nobody can decide this request";
-		case "is_applicant":
-			return "this is your own request";
-		case "not_pending":
-			return "not open for voting";
-		default:
-			return reason;
-	}
+		r.you_may_vote_reason ?? impliedVoteEligibilityReason(r.status);
+	return describeVoteEligibility(reason, r.your_vote, CELL_FALLBACKS);
 }
+
+const CELL_FALLBACKS: VoteEligibilityFallbacks = {
+	unnamedVote: "",
+	unknownReason: (reason) => reason ?? "",
+};
 
 /**
  * How one bar of a vote stands, in one cell: votes cast, of the votes that bar

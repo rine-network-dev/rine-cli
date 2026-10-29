@@ -3,26 +3,27 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerMessages } from "../src/commands/messages.js";
 import * as outputModule from "../src/output.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
-// `rine read` must recognise hpke-hybrid-v1 messages as decryptable. The
+// `rine read` must recognise hpke-hybrid-v2 messages as decryptable. The
 // hybrid PQ work added a new encryption_version, but the read command's
-// canDecrypt gate originally only matched hpke-v1 and sender-key-v1, so hybrid
+// canDecrypt gate originally only matched hpke-hybrid-v2 and sender-key-v1, so hybrid
 // messages silently fell through to the raw "Encrypted Payload" fallback and
 // were never decrypted.
 //
 // These tests drive the REAL `read` command with a message whose
-// encryption_version === "hpke-hybrid-v1". canDecrypt is the gate that
+// encryption_version === "hpke-hybrid-v2". canDecrypt is the gate that
 // decides whether core.decryptMessage is invoked at all. Reverting the fix
-// (dropping "hpke-hybrid-v1" from the canDecrypt union) makes canDecrypt
+// (dropping "hpke-hybrid-v2" from the canDecrypt union) makes canDecrypt
 // false, so decryptMessage is never called and the decrypted payload is
 // never shown — failing every assertion below.
 //
 // SCOPE — IMPORTANT: these CLI tests cover ONLY the CLI-layer gate
-// (`canDecrypt` in src/commands/messages.ts) and the read command's
+// (`canDecrypt` in src/commands/messages-read.ts) and the read command's
 // observable rendering. core.decryptMessage is intentionally mocked here,
 // so these tests do NOT exercise the cryptographic VERSION_HYBRID
 // byte-routing inside core/crypto/message.ts. That dispatch — including the
-// regression where a hpke-hybrid-v1 ciphertext must NOT silently fall back
+// regression where a hpke-hybrid-v2 ciphertext must NOT silently fall back
 // to classical HPKE — is owned by rine-core/test/crypto/message-hybrid.test.ts
 // (see its `describe("decryptMessage version dispatch")` block). Keep the
 // split intentional: do not try to assert real PQ decryption here.
@@ -39,7 +40,7 @@ const HYBRID_MESSAGE: core.MessageRead = {
 	sender_handle: "alice@org.rine.network",
 	recipient_handle: "bot@org.rine.network",
 	encrypted_payload: "AABBCCDD-hybrid-ciphertext",
-	encryption_version: "hpke-hybrid-v1",
+	encryption_version: "hpke-hybrid-v2",
 	created_at: "2026-01-15T12:00:00Z",
 } as unknown as core.MessageRead;
 
@@ -56,10 +57,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 
 	// withClient (action.ts) builds a real HttpClient internally, so intercept
@@ -258,7 +257,7 @@ describe("thread command — reading a group", () => {
 	});
 });
 
-describe("read command — hpke-hybrid-v1 is decryptable", () => {
+describe("read command — hpke-hybrid-v2 is decryptable", () => {
 	it("invokes decryptMessage for a hybrid message", async () => {
 		const decryptSpy = vi
 			.spyOn(core, "decryptMessage")
@@ -279,6 +278,9 @@ describe("read command — hpke-hybrid-v1 is decryptable", () => {
 			expect.any(core.HttpClient),
 			// The envelope is checked against the row's server-authenticated sender.
 			HYBRID_MESSAGE.from_agent_id,
+			AGENT_ID,
+			// The row's own created_at selects the key generation.
+			HYBRID_MESSAGE.created_at,
 		);
 
 		// Observable outcome: the rendered row must be the decrypted view, not
@@ -404,7 +406,7 @@ describe("read command — hpke-hybrid-v1 is decryptable", () => {
 		// ...but decryption threw, so the raw fallback is emitted instead.
 		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
 		expect(arg).not.toHaveProperty("decrypted_payload");
-		expect(arg).toHaveProperty("encryption_version", "hpke-hybrid-v1");
+		expect(arg).toHaveProperty("encryption_version", "hpke-hybrid-v2");
 	});
 });
 describe("read command — a group message whose sender key never arrived", () => {
@@ -497,7 +499,12 @@ describe("read command — what the read did to a closed group's MLS state", () 
 		serveMlsRow();
 		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockResolvedValue({
 			...DECRYPT_RESULT,
-			catchUp: { processed: 3, epoch: 9, evicted: false },
+			catchUp: {
+				processed: 3,
+				epoch: 9,
+				evicted: false,
+				escrow: NO_ESCROW,
+			},
 		});
 		const printJsonSpy = vi
 			.spyOn(outputModule, "printJson")
@@ -507,7 +514,12 @@ describe("read command — what the read did to a closed group's MLS state", () 
 		await program.parseAsync(["node", "rine", "read", MLS_MESSAGE_ID]);
 
 		const arg = printJsonSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-		expect(arg.catch_up).toEqual({ processed: 3, epoch: 9, evicted: false });
+		expect(arg.catch_up).toEqual({
+			processed: 3,
+			epoch: 9,
+			evicted: false,
+			escrow: NO_ESCROW,
+		});
 	});
 
 	it("test_mls_read_when_no_catch_up_ran_then_json_claims_nothing", async () => {
@@ -532,7 +544,12 @@ describe("read command — what the read did to a closed group's MLS state", () 
 		serveMlsRow();
 		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockResolvedValue({
 			...DECRYPT_RESULT,
-			catchUp: { processed: 1, epoch: 10, evicted: true },
+			catchUp: {
+				processed: 1,
+				epoch: 10,
+				evicted: true,
+				escrow: NO_ESCROW,
+			},
 		});
 		const printErrorSpy = vi
 			.spyOn(outputModule, "printError")

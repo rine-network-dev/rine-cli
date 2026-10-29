@@ -23,11 +23,12 @@ import {
 	decryptGroupMessageWithRecovery,
 	decryptMessage,
 	formatError,
+	isGroupEncryptionVersion,
 	isRecoverableMlsRead,
 	mlsReadRefusal,
 	mlsErrorCode,
 } from "@rine-network/core";
-import { mlsFailureText } from "./group-mls.js";
+import { mlsFailureText } from "./group-mls-failure.js";
 
 type DecryptResult = Awaited<ReturnType<typeof decryptMessage>>;
 
@@ -61,9 +62,7 @@ export async function openMessage(opts: {
 }): Promise<OpenedMessage> {
 	const { client, configDir, agentId, data, fromAgentId } = opts;
 	const isGroup =
-		(data.encryption_version === "sender-key-v1" ||
-			data.encryption_version === "mls-v1") &&
-		data.group_id != null;
+		isGroupEncryptionVersion(data.encryption_version) && data.group_id != null;
 
 	if (!isGroup) {
 		try {
@@ -74,6 +73,8 @@ export async function openMessage(opts: {
 					data.encrypted_payload,
 					client,
 					fromAgentId,
+					agentId,
+					data.created_at,
 				),
 				refusal: null,
 			};
@@ -96,6 +97,7 @@ export async function openMessage(opts: {
 				groupId,
 				data.encrypted_payload,
 				fromAgentId,
+				data.created_at,
 			),
 			refusal: null,
 		};

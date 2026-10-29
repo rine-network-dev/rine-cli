@@ -2,6 +2,7 @@ import * as core from "@rine-network/core";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 // The `rine group` verbs say who is acting.
 //
@@ -83,10 +84,8 @@ function wire(agents: core.AgentRead[], respond: Responder = () => GROUP): Comma
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue(agents);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	} as core.CredentialEntry);
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
 		requests.push({
@@ -327,6 +326,7 @@ describe("group — every verb whose answer depends on the acting agent", () => 
 			commits: 1,
 			added: 0,
 			outcomes: [],
+			escrow: NO_ESCROW,
 		});
 		const program = wire([ALICE, BOB]);
 		await run(program, [

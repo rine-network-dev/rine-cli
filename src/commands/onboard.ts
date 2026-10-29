@@ -1,19 +1,21 @@
 import type { Command } from "commander";
-import { createClient, withErrorHandler } from "../action.js";
+import { createClient, resolveDirs, withErrorHandler } from "../action.js";
 import {
 	type AgentRead,
+	DEFAULT_PROFILE,
 	type ListResponse,
+	type WhoAmIRead,
 	compareVerificationWordsForAgent,
-	getCredentialEntry,
 	hasSpiffeEndpoint,
 	performAgentCreation,
 	performRegistration,
 	resolveApiUrl,
-	resolveConfigDir,
+	resolveAuth,
 	validateSlug,
 	verificationWordsLines,
 } from "@rine-network/core";
 import { toAgentRow } from "../agent-format.js";
+import { announcePhrase } from "../phrase-display.js";
 import { printError, printJson, printTable } from "../output.js";
 
 export function registerOnboard(program: Command): void {
@@ -53,8 +55,8 @@ export function registerOnboard(program: Command): void {
 						svid?: string;
 					},
 				) => {
-					const profile = gOpts.profile ?? "default";
-					const configDir = resolveConfigDir();
+					const profile = gOpts.profile ?? DEFAULT_PROFILE;
+					const dirs = resolveDirs();
 					const apiUrl = resolveApiUrl();
 
 					// Slug validation before PoW
@@ -67,19 +69,11 @@ export function registerOnboard(program: Command): void {
 						return;
 					}
 
-					// Idempotency guard
-					const existing = getCredentialEntry(configDir, profile);
-					if (existing) {
-						const { client } = await createClient(
-							configDir,
-							apiUrl,
-							gOpts.profile,
-						);
-						const org = (await client.get("/org")) as {
-							id: string;
-							slug: string;
-							name: string;
-						};
+					// Idempotency guard: a resolvable identity means this owner dir
+					// already holds an org root, so there is nothing to register.
+					if (resolveAuth(dirs, gOpts.profile) !== undefined) {
+						const { client } = await createClient(apiUrl, gOpts.profile);
+						const { org } = (await client.get("/whoami")) as WhoAmIRead;
 						const agents = (await client.get("/agents")) as ListResponse<AgentRead>;
 
 						if (gOpts.json) {
@@ -106,29 +100,29 @@ export function registerOnboard(program: Command): void {
 							"  https://rine.network/privacy.html\n",
 					);
 
-					const progressStream = gOpts.json
-						? process.stderr
-						: process.stdout;
-					const regResult = await performRegistration(
+					const progressStream = gOpts.json ? process.stderr : process.stdout;
+					const reg = await performRegistration(
 						apiUrl,
-						configDir,
+						dirs,
 						profile,
 						{ email: opts.email, slug: opts.slug, name: opts.name },
 						(pct) => {
-							progressStream.write(
-								`\rSolving PoW challenge: ${pct}%`,
-							);
+							progressStream.write(`\rSolving PoW challenge: ${pct}%`);
 						},
 					);
 					progressStream.write("\rSolving PoW challenge: 100%\n");
 
-					// Agent creation
-					const { client } = await createClient(
-						configDir,
-						apiUrl,
-						gOpts.profile,
-					);
-					const agent = await performAgentCreation(client, configDir, profile, {
+					// The one place the words reach a screen, and only on a terminal.
+					announcePhrase({
+						ownerDir: dirs.ownerDir,
+						phrasePath: reg.phrase_path,
+						json: gOpts.json,
+					});
+
+					// Agent creation. The client resolves the org signer from the
+					// owner dir the registration just wrote.
+					const { client } = await createClient(apiUrl, gOpts.profile);
+					const agent = await performAgentCreation(client, dirs, profile, {
 						name: opts.agentName,
 						humanOversight: opts.humanOversight,
 						unlisted: opts.unlisted,
@@ -142,7 +136,7 @@ export function registerOnboard(program: Command): void {
 					// Recomputed from the key just written to this config dir, never
 					// from the string the server sent back with the agent.
 					const verification = compareVerificationWordsForAgent(
-						configDir,
+						dirs.configDir,
 						agent.id,
 						agent.verification_words,
 					);
@@ -153,19 +147,22 @@ export function registerOnboard(program: Command): void {
 					// behind a verify failure).
 					if (gOpts.json) {
 						printJson({
-							org_id: regResult.org_id,
-							client_id: regResult.client_id,
+							org_id: reg.org_id,
+							org_words: reg.org_words,
+							recovery_phrase_file: reg.phrase_path,
 							agent,
 							verification,
 							poll_url: agent.poll_url,
 							identity: agent.identity,
 							identity_error: agent.identityError,
-							config_dir: configDir,
+							config_dir: dirs.configDir,
+							owner_dir: dirs.ownerDir,
 						});
 					} else {
 						printTable([
 							toAgentRow(agent, { includeCard: true, verification }),
 						]);
+						console.log(`Org verification words: ${reg.org_words}`);
 						console.log(
 							`\nAgent '${agent.name}' created — reachable at ${agent.handle}`,
 						);

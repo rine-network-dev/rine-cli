@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
 import * as outputModule from "../src/output.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 // Phase 6 — open-enrollment self-join via external commit.
 //
@@ -56,10 +57,8 @@ beforeEach(() => {
 
   vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
   vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-  vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-    client_id: "test-id",
-    client_secret: "test-secret",
-  });
+  vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+  vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
   vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 
   // processMlsWelcomes is the Phase 5 step; default to a no-op (no Welcome
@@ -102,18 +101,17 @@ function stubJoin(group: core.GroupRead | null): void {
 }
 
 describe("group join — open-enrollment external-commit self-join (Phase 6)", () => {
-  it("self-joins via external commit when MLS-active and no local state exists", async () => {
+  it("asks the shared establishment for the member's state after an immediate join", async () => {
     stubJoin(mlsGroup());
-    vi.spyOn(core, "loadMlsState").mockReturnValue(null);
-    const extJoin = vi
-      .spyOn(core, "externalJoinMlsGroup")
-      .mockResolvedValue({ epoch: 2 });
+    const establish = vi
+      .spyOn(core, "establishMlsMembership")
+      .mockResolvedValue({ outcome: core.MlsMembershipOutcome.ExternalJoined });
 
     const program = makeProgram({ json: true });
     await program.parseAsync(["node", "rine", "group", "join", GROUP_ID]);
 
-    expect(extJoin).toHaveBeenCalledTimes(1);
-    expect(extJoin).toHaveBeenCalledWith(
+    expect(establish).toHaveBeenCalledTimes(1);
+    expect(establish).toHaveBeenCalledWith(
       CONFIG_DIR,
       AGENT_ID,
       GROUP_ID,
@@ -127,11 +125,10 @@ describe("group join — open-enrollment external-commit self-join (Phase 6)", (
     vi.spyOn(core, "loadMlsState").mockReturnValue({
       groupId: GROUP_ID,
       epoch: 1,
-      cipherSuite: 0x0001,
     });
     const extJoin = vi
       .spyOn(core, "externalJoinMlsGroup")
-      .mockResolvedValue({ epoch: 2 });
+      .mockResolvedValue({ epoch: 2, escrow: NO_ESCROW });
 
     const program = makeProgram({ json: true });
     await program.parseAsync(["node", "rine", "group", "join", GROUP_ID]);
@@ -144,7 +141,7 @@ describe("group join — open-enrollment external-commit self-join (Phase 6)", (
     const loadState = vi.spyOn(core, "loadMlsState").mockReturnValue(null);
     const extJoin = vi
       .spyOn(core, "externalJoinMlsGroup")
-      .mockResolvedValue({ epoch: 2 });
+      .mockResolvedValue({ epoch: 2, escrow: NO_ESCROW });
 
     const program = makeProgram({ json: true });
     await program.parseAsync(["node", "rine", "group", "join", GROUP_ID]);
@@ -156,10 +153,12 @@ describe("group join — open-enrollment external-commit self-join (Phase 6)", (
 
   it("self-join failure is non-fatal — the join itself still succeeds", async () => {
     stubJoin(mlsGroup());
-    vi.spyOn(core, "loadMlsState").mockReturnValue(null);
-    vi.spyOn(core, "externalJoinMlsGroup").mockRejectedValue(
-      new Error("no published GroupInfo"),
-    );
+    const error = new Error("no published GroupInfo");
+    vi.spyOn(core, "establishMlsMembership").mockResolvedValue({
+      outcome: core.MlsMembershipOutcome.Failed,
+      reason: error.message,
+      failure: { step: core.MlsEstablishStep.ExternalJoin, error },
+    });
 
     const program = makeProgram({ json: true });
     await program.parseAsync(["node", "rine", "group", "join", GROUP_ID]);
@@ -289,7 +288,7 @@ describe("group invites — authoritative agent-scoped pull", () => {
 // wiring at the @rine-network/core boundary the CLI actually crosses:
 // sendGroupInviteNotification is invoked with the resolved inviter, the
 // invitee, and the freshly-fetched group handle. The sealed-DM round-trip
-// (encryptMessage / fetchRecipientKeys / the /messages POST type+body) is owned
+// (sealForAgent / the /messages POST type+body) is owned
 // by rine-core/test/group-invite-ops.test.ts — it lives inside core and cannot
 // be intercepted from this package's namespace spy. Here we own only the CLI
 // surface wiring. Best-effort by contract: a failure must never fail the invite.

@@ -1,12 +1,12 @@
 import {
 	type GroupMemberRead,
 	type GroupRead,
-	type JoinRequestRead,
-	type ListResponse,
 	ACTING_AGENT_HEADER,
+	GROUP_READERS_NOTICE,
 	UUID_RE,
 	deleteGroupMember,
 	evictionMessage,
+	fetchGroupMembers,
 	loadMlsState,
 	resolveToUuid,
 	retireLocalGroupState,
@@ -23,7 +23,7 @@ import {
 	printText,
 } from "../output.js";
 import { asGroupAccessError } from "./group-eviction.js";
-import { installWelcomes, selfJoinViaExternalCommit } from "./group-mls.js";
+import { joinAndEstablish } from "./group-mls.js";
 import { memberRow, requestRow } from "./group-rows.js";
 import {
 	type SenderKeyCoverage,
@@ -88,11 +88,9 @@ export function registerGroupMembership(
 		.action(
 			withClient(program, async (ctx: ActionContext, ref: string) => {
 				const { id: groupId } = await groupTarget(ctx, ref);
-				let data: ListResponse<GroupMemberRead>;
+				let items: GroupMemberRead[];
 				try {
-					data = (await ctx.client.get(
-						`/groups/${groupId}/members`,
-					)) as ListResponse<GroupMemberRead>;
+					items = await fetchGroupMembers(ctx.client, groupId);
 				} catch (err) {
 					// A cross-org evicted agent is refused this read outright, so the
 					// eviction has to be answered on the refusal or not at all.
@@ -104,15 +102,18 @@ export function registerGroupMembership(
 				const coverage = await coverageFor(
 					ctx,
 					groupId,
-					data.items.map((m) => m.agent_id),
+					items.map((m) => m.agent_id),
 				);
+				// The server sends the whole roster on one page, so its `total` is
+				// the row count.
+				const data = { items, total: items.length };
 				if (ctx.gOpts.json) {
 					printJson(
 						coverage ? { ...data, sender_key_coverage: coverage } : data,
 					);
 					return;
 				}
-				printTable(data.items.map(memberRow));
+				printTable(items.map(memberRow));
 				const warning = coverage ? coverageWarning(coverage) : "";
 				if (warning) printText(warning);
 			}),
@@ -120,7 +121,7 @@ export function registerGroupMembership(
 
 	group
 		.command("join")
-		.description("Join a group")
+		.description(`Join a group. ${GROUP_READERS_NOTICE}`)
 		.argument("<group-ref>", GROUP_REFERENCE_HELP)
 		// 🔴 This verb never asks for the acting agent's id, and the flag still
 		// decides the whole outcome: `POST /groups/{id}/join` seats whichever agent
@@ -148,37 +149,11 @@ export function registerGroupMembership(
 					const body: Record<string, unknown> = {};
 					if (opts.message) body.message = opts.message;
 
-					const data = (await ctx.client.post(
-						`/groups/${groupId}/join`,
-						body,
-					)) as GroupMemberRead | JoinRequestRead;
-					if ("role" in data) {
-						// Immediate membership: install any pending MLS Welcome so the
-						// joiner can decrypt/send. Best-effort, with one exception:
-						// a Welcome the substitution guard REFUSED for THIS group
-						// fails the command and exits non-zero. The rine
-						// membership stands either way — the join POST has already
-						// returned 200 — so this is not a retryable join.
-						await installWelcomes(
-							ctx.client,
-							ctx.configDir,
-							data.agent_id,
-							groupId,
-							ctx.gOpts.json,
-						);
-						// Open-enrollment fallback: if the group is MLS-active but no
-						// Welcome arrived (no admin minted one), self-join via an external
-						// commit. Best-effort, runs only when no local state exists.
-						const joined = await readGroup(ctx, groupId);
-						await selfJoinViaExternalCommit(
-							ctx.client,
-							ctx.configDir,
-							groupId,
-							data.agent_id,
-							joined?.mls_group_id,
-							ctx.gOpts.json,
-						);
-					}
+					// A 200 is an immediate membership, and its local MLS state is set
+					// up here. The rine membership stands whatever that setup does: a
+					// refusal for THIS group fails the command and exits non-zero, and
+					// this is not a retryable join.
+					const data = await joinAndEstablish(ctx, groupId, body);
 					if (ctx.gOpts.json) {
 						printJson(data);
 					} else if ("role" in data) {

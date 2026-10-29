@@ -1,9 +1,14 @@
 import {
+	GROUP_NOT_FOUND_LEAD,
 	RineApiError,
+	holdsAnyMlsState,
 	holdsMlsState,
 	loadMlsGroup,
+	namesASeatedSibling,
 	openMlsClient,
+	withEvictionPointer,
 } from "@rine-network/core";
+import type { ActionContext } from "../action.js";
 
 const EVICTED_EXPLAINED =
 	"A Remove commit evicted this agent's leaf from the group's ratchet tree, so" +
@@ -49,7 +54,7 @@ export function isEvictedFrom(
  * it used to be a member.
  *
  * This is the case eviction detection exists for and the only one an evicted
- * agent normally reaches. `has_read_access` (`src/rine/api/group_helpers.py`)
+ * agent normally reaches. `has_read_access` (`src/rine/api/group_scope.py`)
  * 403s an evicted agent from another org, so the read never returns a group at
  * all — a check that runs on the response body cannot fire, and the operator
  * gets a bare refusal identical to the one an agent who was never a member
@@ -64,6 +69,14 @@ export function isEvictedFrom(
  * state and has no cryptographic eviction at all — is never described
  * as one.
  *
+ * A refusal that names a seated sibling of this org is returned untouched too:
+ * nobody was evicted, and the server's own sentence carries the remedy (retry
+ * as that sibling). `namesASeatedSibling` needs the retry instruction as well
+ * as the not-a-member clause, so the "no agent of your org is" arm — which a
+ * genuinely evicted agent in a single-agent org reads — still gets the
+ * eviction wording. The MCP twin (`rine-mcp/src/tools/group-eviction.ts`)
+ * applies the same rule.
+ *
  * The acting agent is resolved through a callback and only on the refusal path,
  * so a read that succeeded costs no extra round trip.
  */
@@ -75,6 +88,7 @@ export async function asGroupAccessError(
 ): Promise<unknown> {
 	if (!(err instanceof RineApiError)) return err;
 	if (err.status !== 403 && err.status !== 404) return err;
+	if (namesASeatedSibling(err.detail)) return err;
 	return await asEvictionRefusal(configDir, groupId, err, actingAgent);
 }
 
@@ -102,4 +116,58 @@ export async function asEvictionRefusal(
 		return err;
 	}
 	return new Error(evictedMessage(groupId), { cause: err });
+}
+
+/**
+ * Widen an unknown-group refusal with the eviction pointer, where it applies.
+ *
+ * The arm above it — a reference that is not a UUID — is where the eviction
+ * sentence is unreachable: the ladder resolved to no row, so there is
+ * no group id to ask `holdsMlsState` with, and an evicted agent naming its
+ * group by handle reads "Group not found" over a roster it is no longer on.
+ * That case is answered with a POINTER instead, composed in `rine-core`
+ * beside the refusal it grows onto.
+ *
+ * Three gates, in this order and lazily, which is the whole cost argument:
+ *
+ * 1. the error is the UNKNOWN-group refusal, decided by the lead six published
+ *    surfaces already branch on. 🔴 An AMBIGUOUS reference opens with a
+ *    different lead and must not get this — it resolved to too many rows, not
+ *    to none — and neither must a transport failure, which opens with neither;
+ * 2. only then {@link ActionContext.actingAgent}, which costs a round trip on
+ *    a multi-agent org;
+ * 3. only then the local store scan.
+ *
+ * Either of the last two raising returns the error untouched, exactly as
+ * {@link asEvictionRefusal} does: a store that cannot be read, or a caller
+ * whose acting agent cannot be named, has not proved anything about a removal.
+ *
+ * 🔴 Not threaded down into `matchGroupByName`. That function is synchronous
+ * and a published export of `@rine-network/core`, `actingAgent()` is async, and
+ * computing the fact eagerly would pay it on every group verb call rather than
+ * on the refusal path it is confined to.
+ *
+ * 🔴 Exported because `groupTarget` is not the only place these two
+ * spellings are refused. `rine send --to '#standup@acme.rine.network'` does not
+ * climb this ladder — it calls `resolveGroupByHandle` itself — and `send` is
+ * the verb an evicted agent is most likely to reach for. One group, one
+ * spelling, two different answers on two verbs is the inconsistency this
+ * trigger exists to end, so it is shared rather than re-derived.
+ *
+ * 🔴 It stays off the JOIN path. `joinGroupTarget` names a group this org
+ * holds no seat in BY DEFINITION, so "you may have been removed" is nonsense
+ * there, not a milder version of the truth.
+ */
+export async function withEvictionPointerIfHeld(
+	ctx: ActionContext,
+	err: unknown,
+): Promise<unknown> {
+	if (!(err instanceof Error)) return err;
+	if (!err.message.startsWith(GROUP_NOT_FOUND_LEAD)) return err;
+	try {
+		if (!holdsAnyMlsState(ctx.configDir, await ctx.actingAgent())) return err;
+	} catch {
+		return err;
+	}
+	return new Error(withEvictionPointer(err.message), { cause: err });
 }

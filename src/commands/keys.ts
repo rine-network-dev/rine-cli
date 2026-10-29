@@ -1,40 +1,22 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { withClient, withErrorHandler } from "../action.js";
-import { actorOption } from "../actor.js";
 import {
-	type AgentKeys,
 	type AgentKeysResponse,
 	RineApiError,
 	agentKeysExist,
-	fromBase64Url,
-	generateAgentKeys,
-	generatePqKeyPair,
-	getAgentPublicKeys,
 	loadAgentKeys,
-	resolveConfigDir,
-	saveAgentKeys,
-	savePqEncryptionKey,
+	rotateAgentWithSeats,
 	toBase64Url,
-	validateEncryptionKey,
-	validateSigningKey,
 } from "@rine-network/core";
-import { printError, printJson, printMutationOk, printTable } from "../output.js";
-
-interface KeyExport {
-	agent_id: string;
-	signing_private_key: string;
-	encryption_private_key: string;
-	pq_encryption_private_key?: string;
-}
-
-function getKeysDir(configDir: string, agentId: string): string {
-	return join(configDir, "keys", agentId);
-}
+import { withClient } from "../action.js";
+import { actorOption } from "../actor.js";
+import { printJson, printTable } from "../output.js";
+import { printRotationReport } from "./keys-rotate-report.js";
+import { registerKeysTransfer } from "./keys-transfer.js";
 
 function backupKeys(configDir: string, agentId: string): void {
-	const dir = getKeysDir(configDir, agentId);
+	const dir = join(configDir, "keys", agentId);
 	const ts = new Date().toISOString().replace(/[:.]/g, "-");
 	for (const name of ["signing.key", "encryption.key", "pq_encryption.key"]) {
 		const src = join(dir, name);
@@ -49,30 +31,21 @@ function backupKeys(configDir: string, agentId: string): void {
 	}
 }
 
+/** The server must hold the public keys the rotation just saved locally. */
 async function verifyServerKeys(
 	client: { get: (url: string) => Promise<unknown> },
+	configDir: string,
 	agentId: string,
-	expected: {
-		signing_public_key: { x: string };
-		encryption_public_key: { x: string };
-		pq_encryption_public_key?: { x: string };
-	},
 ): Promise<void> {
+	const local = loadAgentKeys(configDir, agentId);
 	const server = (await client.get(`/agents/${agentId}/keys`)) as AgentKeysResponse;
 	if (
-		server.signing_public_key.x !== expected.signing_public_key.x ||
-		server.encryption_public_key.x !== expected.encryption_public_key.x
+		server.signing_public_key.x !== toBase64Url(local.signing.publicKey) ||
+		server.encryption_public_key.x !== toBase64Url(local.encryption.publicKey) ||
+		server.pq_encryption_public_key?.x !== toBase64Url(local.pqEncryption.publicKey)
 	) {
 		throw new Error(
-			"Server key verification failed: uploaded keys do not match. Old keys preserved locally.",
-		);
-	}
-	if (
-		expected.pq_encryption_public_key &&
-		server.pq_encryption_public_key?.x !== expected.pq_encryption_public_key.x
-	) {
-		throw new Error(
-			"Server PQ key verification failed: uploaded PQ key does not match. Old keys preserved locally.",
+			"Server key verification failed: the server's keys do not match the rotated keys. Old keys preserved locally as .bak files.",
 		);
 	}
 }
@@ -181,213 +154,31 @@ export function registerKeys(program: Command): void {
 		);
 
 	keys
-		.command("generate")
-		.description("Generate new E2EE keys for an agent")
-		.addOption(actorOption())
-		.action(
-			withClient(
-				program,
-				async ({ client, gOpts, configDir,  actingAgent }) => {
-					const agentId = await actingAgent();
-
-					if (agentKeysExist(configDir, agentId)) {
-						printError(
-							`Keys already exist for agent ${agentId}. Use 'rine keys rotate' to replace them.`,
-						);
-						process.exitCode = 1;
-						return;
-					}
-
-					const agentKeys = generateAgentKeys();
-					const pubKeys = getAgentPublicKeys(configDir, agentId, agentKeys);
-					await client.post(`/agents/${agentId}/keys`, pubKeys);
-					await verifyServerKeys(client, agentId, pubKeys);
-					saveAgentKeys(configDir, agentId, agentKeys);
-
-					printMutationOk(
-						`E2EE keys generated for agent ${agentId}`,
-						gOpts.json,
-					);
-				},
-			),
-		);
-
-	keys
 		.command("rotate")
 		.description("Rotate E2EE keys for an agent")
 		.addOption(actorOption())
 		.action(
 			withClient(
 				program,
-				async ({ client, gOpts, configDir,  actingAgent }) => {
+				async ({ client, gOpts, configDir, ownerDir, actingAgent }) => {
 					const agentId = await actingAgent();
 
 					if (agentKeysExist(configDir, agentId)) {
 						backupKeys(configDir, agentId);
 					}
 
-					const agentKeys = generateAgentKeys();
-					const pubKeys = getAgentPublicKeys(configDir, agentId, agentKeys);
-					await client.post(`/agents/${agentId}/keys`, pubKeys);
-					await verifyServerKeys(client, agentId, pubKeys);
-					saveAgentKeys(configDir, agentId, agentKeys);
-
-					printMutationOk(`E2EE keys rotated for agent ${agentId}`, gOpts.json);
-				},
-			),
-		);
-
-	keys
-		.command("add-pq")
-		.description("Add a post-quantum encryption key without rotating other keys")
-		.addOption(actorOption())
-		.action(
-			withClient(
-				program,
-				async ({ client, gOpts, configDir,  actingAgent }) => {
-					const agentId = await actingAgent();
-
-					if (!agentKeysExist(configDir, agentId)) {
-						printError(
-							`No keys found for agent ${agentId}. Use 'rine keys generate' first.`,
-						);
-						process.exitCode = 1;
-						return;
-					}
-
-					const existingKeys = loadAgentKeys(configDir, agentId);
-					if (existingKeys.pqEncryption) {
-						printError(
-							`Agent ${agentId} already has a post-quantum key. Use 'rine keys rotate' to replace all keys.`,
-						);
-						process.exitCode = 1;
-						return;
-					}
-
-					backupKeys(configDir, agentId);
-
-					const pqKeyPair = generatePqKeyPair();
-					const keysWithPq: AgentKeys = { ...existingKeys, pqEncryption: pqKeyPair };
-					const pubKeys = getAgentPublicKeys(configDir, agentId, keysWithPq);
-					await client.post(`/agents/${agentId}/keys`, pubKeys);
-					await verifyServerKeys(client, agentId, pubKeys);
-					savePqEncryptionKey(configDir, agentId, pqKeyPair);
-
-					printMutationOk(
-						`Post-quantum encryption key added for agent ${agentId}`,
-						gOpts.json,
+					const report = await rotateAgentWithSeats(
+						client,
+						{ configDir, ownerDir },
+						agentId,
 					);
+					await verifyServerKeys(client, configDir, agentId);
+
+					printRotationReport(agentId, report, gOpts.json);
 				},
 			),
 		);
 
-	keys
-		.command("export")
-		.description("Export private keys to a file")
-		.addOption(actorOption())
-		.requiredOption("--output <file>", "Output file path")
-		.action(
-			withClient(
-				program,
-				async ({  gOpts, configDir,  actingAgent }, opts: { agent?: string; output: string }) => {
-					const agentId = await actingAgent();
-
-					if (!agentKeysExist(configDir, agentId)) {
-						printError(`No keys found for agent ${agentId}`);
-						process.exitCode = 1;
-						return;
-					}
-
-					const agentKeys = loadAgentKeys(configDir, agentId);
-					const exported: KeyExport = {
-						agent_id: agentId,
-						signing_private_key: toBase64Url(agentKeys.signing.privateKey),
-						encryption_private_key: toBase64Url(
-							agentKeys.encryption.privateKey,
-						),
-					};
-					if (agentKeys.pqEncryption) {
-						exported.pq_encryption_private_key = toBase64Url(
-							agentKeys.pqEncryption.privateKey,
-						);
-					}
-
-					fs.writeFileSync(opts.output, JSON.stringify(exported, null, 2));
-					fs.chmodSync(opts.output, 0o600);
-
-					if (gOpts.json) {
-						printJson({ ok: true, path: opts.output });
-					} else {
-						console.log(`Keys exported to ${opts.output}`);
-					}
-				},
-			),
-		);
-
-	keys
-		.command("import")
-		.description("Import private keys from a file")
-		.requiredOption("--input <file>", "Input file path")
-		.action(
-			withErrorHandler(program, (gOpts, opts: { input: string }) => {
-				const raw = fs.readFileSync(opts.input, "utf-8");
-				const data = JSON.parse(raw) as KeyExport;
-
-				if (
-					!data.agent_id ||
-					!data.signing_private_key ||
-					!data.encryption_private_key
-				) {
-					printError("Invalid key export file");
-					process.exitCode = 2;
-					return;
-				}
-
-				// Validate key material before writing
-				try {
-					validateSigningKey(fromBase64Url(data.signing_private_key));
-				} catch (err) {
-					printError(`Invalid signing key: ${(err as Error).message}`);
-					process.exitCode = 2;
-					return;
-				}
-
-				try {
-					validateEncryptionKey(fromBase64Url(data.encryption_private_key));
-				} catch (err) {
-					printError(`Invalid encryption key: ${(err as Error).message}`);
-					process.exitCode = 2;
-					return;
-				}
-
-				if (data.pq_encryption_private_key) {
-					const pqBytes = fromBase64Url(data.pq_encryption_private_key);
-					if (pqBytes.length !== 2400) {
-						printError(`Invalid PQ encryption key: expected 2400 bytes, got ${pqBytes.length}`);
-						process.exitCode = 2;
-						return;
-					}
-				}
-
-				const configDir = resolveConfigDir();
-				const dir = join(configDir, "keys", data.agent_id);
-				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-
-				const sigPath = join(dir, "signing.key");
-				fs.writeFileSync(sigPath, data.signing_private_key, "utf-8");
-				fs.chmodSync(sigPath, 0o600);
-
-				const encPath = join(dir, "encryption.key");
-				fs.writeFileSync(encPath, data.encryption_private_key, "utf-8");
-				fs.chmodSync(encPath, 0o600);
-
-				if (data.pq_encryption_private_key) {
-					const pqPath = join(dir, "pq_encryption.key");
-					fs.writeFileSync(pqPath, data.pq_encryption_private_key, "utf-8");
-					fs.chmodSync(pqPath, 0o600);
-				}
-
-				printMutationOk(`Keys imported for agent ${data.agent_id}`, gOpts.json);
-			}),
-		);
+	registerKeysTransfer(keys, program);
 }
+

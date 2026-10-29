@@ -1,11 +1,8 @@
 import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
-import {
-	loadCredentials,
-	saveCredentials,
-} from "@rine-network/core";
-import {  printJson, printMutationOk } from "../output.js";
+import { loadProfiles, saveProfiles } from "@rine-network/core";
+import { printJson, printMutationOk } from "../output.js";
 
 export function registerPollToken(program: Command): void {
 	program
@@ -25,11 +22,11 @@ export function registerPollToken(program: Command): void {
 					if (opts.revoke) {
 						await client.delete(`/agents/${agentId}/poll-token`);
 
-						// Remove poll_url from credentials
-						const creds = loadCredentials(configDir);
-						if (creds[profileName]) {
-							delete creds[profileName].poll_url;
-							saveCredentials(configDir, creds);
+						// Remove poll_url from the runtime profile entry
+						const profiles = loadProfiles(configDir);
+						if (profiles[profileName]?.poll_url !== undefined) {
+							delete profiles[profileName].poll_url;
+							saveProfiles(configDir, profiles);
 						}
 
 						printMutationOk("Poll token revoked", gOpts.json);
@@ -41,18 +38,18 @@ export function registerPollToken(program: Command): void {
 						{},
 					)) as { poll_url: string };
 
-					// Update credentials with new poll_url
-					const creds = loadCredentials(configDir);
-					if (creds[profileName]) {
-						creds[profileName].poll_url = data.poll_url;
-						saveCredentials(configDir, creds);
+					// Update the runtime profile entry with the new poll_url
+					const profiles = loadProfiles(configDir);
+					if (profiles[profileName]) {
+						profiles[profileName].poll_url = data.poll_url;
+						saveProfiles(configDir, profiles);
 					}
 
 					if (gOpts.json) {
 						printJson(data);
 					} else {
 						console.log(`Poll URL: ${data.poll_url}`);
-						console.log("Credentials updated.");
+						console.log("Profile updated.");
 					}
 				},
 			),

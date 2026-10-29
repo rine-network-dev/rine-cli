@@ -4,6 +4,7 @@ import {
 	type HttpClient,
 	type MlsAdmissionResult,
 	ACTING_AGENT_HEADER,
+	GROUP_READERS_NOTICE,
 	VOTE_DURATION_RULE,
 	admissionHeadline,
 	initMlsGroup,
@@ -20,7 +21,7 @@ import {
 	dedupeIds,
 	visibilityRefusal,
 } from "./group-args.js";
-import { warnMls } from "./group-mls.js";
+import { warnMls } from "./group-mls-failure.js";
 import {
 	type GroupCreateResponse,
 	CLI_UNFOUNDED_REPAIR,
@@ -161,7 +162,7 @@ function printCreated(
 export function registerGroupCreate(program: Command, group: Command): void {
 	group
 		.command("create")
-		.description("Create a new group")
+		.description(`Create a new group. ${GROUP_READERS_NOTICE}`)
 		.requiredOption("--name <name>", "Group name (DNS-safe slug)")
 		.option("--description <desc>", DESCRIPTION_HELP)
 		.option(
@@ -208,7 +209,7 @@ export function registerGroupCreate(program: Command, group: Command): void {
 				if (opts.member.length > 0) {
 					body.members = dedupeIds(
 						await Promise.all(
-							// Item 18: announced per member and in the order they were
+							// A completed handle is announced per member, in the order they were
 							// typed, before any resolution races. A founding roster is
 							// exactly where a silent completion seats the wrong agent.
 							opts.member.map((m) => {

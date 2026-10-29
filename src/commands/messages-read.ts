@@ -1,18 +1,19 @@
 /**
- * `rine message read` — fetch one message and open it.
- *
- * Split out of `messages.ts` because the decrypt-and-render pipeline is the
- * longest handler there by a wide margin and has nothing to do with sending.
- * The command is registered by `messages.ts` alongside its siblings, so the
- * CLI surface is unchanged.
+ * `rine message read` — fetch one message and open it: the decrypt-and-render
+ * pipeline, which has nothing to do with sending. Registered by `messages.ts`
+ * alongside its siblings.
  */
 
 import {
+	A2A_CLEARTEXT_NOTICE,
+	a2aCleartextPlaintext,
 	type MessageRead,
 	MLS_EVICTED_BY_COMMIT,
 	THREAD_UNAVAILABLE,
 	agentKeysExist,
 	ingestSenderKeyDistribution,
+	isA2aCleartext,
+	isDecryptableVersion,
 	withPeekHeader,
 } from "@rine-network/core";
 import type { Command } from "commander";
@@ -20,7 +21,7 @@ import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printError, printJson, printTable, printText } from "../output.js";
 import { type DecryptRefusal, openMessage } from "./messages-read-decrypt.js";
-import { msgFrom, msgGroup, msgTo, verifiedMark } from "./messages-rows.js";
+import { jsonRow, msgFrom, msgGroup, msgTo, verifiedMark } from "./messages-rows.js";
 
 /**
  * What `read` itself takes, beside the actor flag every verb here declares.
@@ -96,10 +97,7 @@ export function addReadCommand(parent: Command, program: Command): void {
 					const fromAgentId = data.from_agent_id;
 					const canDecrypt =
 						fromAgentId !== undefined &&
-						(data.encryption_version === "hpke-v1" ||
-							data.encryption_version === "hpke-hybrid-v1" ||
-							data.encryption_version === "sender-key-v1" ||
-							data.encryption_version === "mls-v1") &&
+						isDecryptableVersion(data.encryption_version) &&
 						agentKeysExist(configDir, agentId);
 
 					let refusal: DecryptRefusal | null = null;
@@ -116,7 +114,7 @@ export function addReadCommand(parent: Command, program: Command): void {
 						refusal = opened.refusal;
 						// Prose to stderr for a human, ahead of whatever renders below. A
 						// `--json` caller is told the same thing as a field instead, on the
-						// envelope at the end — never both, and no longer neither.
+						// envelope at the end — never both, and never neither.
 						if (refusal !== null && !gOpts.json) printError(refusal.message);
 
 						if (decResult) {
@@ -185,7 +183,7 @@ export function addReadCommand(parent: Command, program: Command): void {
 						// `encrypted_payload` in full, so a program loses nothing the
 						// human rendering below stopped printing.
 						printJson({
-							...data,
+							...jsonRow(data),
 							...(refusal !== null
 								? {
 										decrypt_error: refusal.message,
@@ -211,6 +209,12 @@ export function addReadCommand(parent: Command, program: Command): void {
 							{
 								...readRow(data),
 								Encryption: data.encryption_version,
+								...(isA2aCleartext(data)
+									? {
+											Notice: A2A_CLEARTEXT_NOTICE,
+											Payload: a2aCleartextPlaintext(data).slice(0, 200),
+										}
+									: {}),
 								"Encrypted Payload": `${data.encrypted_payload.slice(0, 40)}...`,
 								Created: data.created_at,
 							},

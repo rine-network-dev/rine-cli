@@ -20,26 +20,24 @@
  *
  * 🔴 **`join` is not on this ladder.** {@link joinGroupTarget} is a separate
  * export for a separate resolver, and the two must never be collapsed: `join`
- * is aimed at a group this org holds no seat in by definition, so the member
- * ladder's first rung — the org's own group list — is the one thing that cannot
+ * is aimed at a group the caller holds no seat in by definition, so the member
+ * ladder's first rung — the caller's own group list — is the one thing that cannot
  * answer it.
  */
 
 import {
-	GROUP_NOT_FOUND_LEAD,
 	type GroupTarget,
 	RineApiError,
 	type SeatedGroupTarget,
 	UUID_RE,
-	holdsAnyMlsState,
 	resolveGroup,
 	resolveGroupForJoin,
-	withEvictionPointer,
 } from "@rine-network/core";
 import type { ActionContext } from "../action.js";
 import {
 	asEvictionRefusal,
 	asGroupAccessError,
+	withEvictionPointerIfHeld,
 } from "./group-eviction.js";
 
 /**
@@ -81,60 +79,6 @@ export function directoryGroupUuidRefusal(ref: string): string {
 		" — for a group this org is already in — `rine group get`, which takes a" +
 		" handle or a name."
 	);
-}
-
-/**
- * Widen an unknown-group refusal with the eviction pointer, where it applies.
- *
- * The arm above it — a reference that is not a UUID — is where the eviction
- * sentence is unreachable: the ladder resolved to no row, so there is
- * no group id to ask `holdsMlsState` with, and an evicted agent naming its
- * group by handle reads "Group not found" over a roster it is no longer on.
- * That case is answered with a POINTER instead, composed in `rine-core`
- * beside the refusal it grows onto.
- *
- * Three gates, in this order and lazily, which is the whole cost argument:
- *
- * 1. the error is the UNKNOWN-group refusal, decided by the lead six published
- *    surfaces already branch on. 🔴 An AMBIGUOUS reference opens with a
- *    different lead and must not get this — it resolved to too many rows, not
- *    to none — and neither must a transport failure, which opens with neither;
- * 2. only then {@link ActionContext.actingAgent}, which costs a round trip on
- *    a multi-agent org;
- * 3. only then the local store scan.
- *
- * Either of the last two raising returns the error untouched, exactly as
- * {@link asEvictionRefusal} does: a store that cannot be read, or a caller
- * whose acting agent cannot be named, has not proved anything about a removal.
- *
- * 🔴 Not threaded down into `matchGroupByName`. That function is synchronous
- * and a published export of `@rine-network/core`, `actingAgent()` is async, and
- * computing the fact eagerly would pay it on every group verb call rather than
- * on the refusal path it is confined to.
- *
- * 🔴 Exported because {@link groupTarget} is not the only place these two
- * spellings are refused. `rine send --to '#standup@acme.rine.network'` does not
- * climb this ladder — it calls `resolveGroupByHandle` itself — and `send` is
- * the verb an evicted agent is most likely to reach for. One group, one
- * spelling, two different answers on two verbs is the inconsistency this
- * trigger exists to end, so it is shared rather than re-derived.
- *
- * 🔴 It stays off the JOIN path. {@link joinGroupTarget} names a group this org
- * holds no seat in BY DEFINITION, so "you may have been removed" is nonsense
- * there, not a milder version of the truth.
- */
-export async function withEvictionPointerIfHeld(
-	ctx: ActionContext,
-	err: unknown,
-): Promise<unknown> {
-	if (!(err instanceof Error)) return err;
-	if (!err.message.startsWith(GROUP_NOT_FOUND_LEAD)) return err;
-	try {
-		if (!holdsAnyMlsState(ctx.configDir, await ctx.actingAgent())) return err;
-	} catch {
-		return err;
-	}
-	return new Error(withEvictionPointer(err.message), { cause: err });
 }
 
 /**
@@ -184,7 +128,7 @@ export async function groupTarget(
  * Resolve `rine group join`'s argument — the one verb aimed outside the org.
  *
  * 🔴 **`resolveGroupForJoin`, never `resolveGroup`.** The rungs differ because
- * the question differs: `join` names a group this org holds no seat in, so
+ * the question differs: `join` names a group the caller holds no seat in, so
  * `GET /groups` answering nothing is this ladder's FIRST rung rather than its
  * refusal, and its UUID rung is a passthrough on purpose — there is no
  * readable row to check it against, and inventing one would be a client

@@ -1,0 +1,33 @@
+╭ ◆ rine · Acme Corp ───────── org key ╮
+│ sal… → bil…  Invoice 4…        now ✓ │
+│ #ops · sal…  Deploy fi…         5m ✓ │
+│▌sal… → b…@…  Quote acc…      13:30 ✓ │
+│ sal… → b…@…  No key co…  yesterday ! │
+│ #ops · bil…  the sende…        Fri ? │
+│ b…@… → sal…  signature…     14 Oct ✗ │
+│ b…@… → bil…  signed by…   Sep 2025 ✗ │
+│                                      │
+╰j/k move · enter open · ? help        ╯
+--- styles ---
+abcbccccdddbbbbbbbbbbaaaaaaaaa.........a
+a.....ddd..................ddddddddd.e.a
+a.ffffddd..................ddddddddd.e.a
+abgggghhhgggggggggggggggggghhhhhhhhhgi.a
+a.....ddd......jjjjjjjjjj..ddddddddd.j.a
+a.ffffddd......dddddddddd..ddddddddd.j.a
+a.....ddd......dddddddddd..ddddddddd.k.a
+a.....ddd......dddddddddd..ddddddddd.k.a
+a......................................a
+abbbddddddddbbbbbddddddddbddddd........a
+--- legend ---
+a "\u001b[0;38;2;0;224;200m"
+b "\u001b[0;1;38;2;0;224;200m"
+c "\u001b[0;1;38;2;51;245;221m"
+d "\u001b[0;38;2;107;114;128m"
+e "\u001b[0;38;2;138;217;188m"
+f "\u001b[0;38;2;187;154;247m"
+g "\u001b[0;1;7m"
+h "\u001b[0;1;7;38;2;107;114;128m"
+i "\u001b[0;1;7;38;2;138;217;188m"
+j "\u001b[0;38;2;255;184;20m"
+k "\u001b[0;38;2;247;118;142m"

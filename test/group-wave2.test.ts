@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGroup } from "../src/commands/group.js";
 import * as outputModule from "../src/output.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 // The group verbs, CLI half. Every test drives the REAL command through
 // commander and asserts what crosses a boundary the CLI actually owns: the
@@ -55,6 +56,7 @@ function admissionResult(
 		commits: 1,
 		added: 1,
 		outcomes: [{ agentId: ALICE, status: "added" }],
+		escrow: NO_ESCROW,
 		...overrides,
 	};
 }
@@ -84,10 +86,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: ADMIN_ID, handle: "admin@acme.rine.network" },
@@ -382,11 +382,11 @@ describe("group create/get — the crypto regime is stated, printed and in --jso
 		});
 	});
 
-	it("reports a classical-suite MLS group as NOT post-quantum", async () => {
+	it("reports a non-X-Wing MLS group as NOT post-quantum", async () => {
 		stubHttp({
 			get: {
 				[`/groups/${GROUP_ID}`]: group({
-					mls_cipher_suite: core.MLS_CIPHER_SUITE_CLASSICAL,
+					mls_cipher_suite: 0x0001,
 				}),
 			},
 		});
@@ -397,7 +397,7 @@ describe("group create/get — the crypto regime is stated, printed and in --jso
 		});
 
 		await run(["get", GROUP_ID]);
-		expect(printed.join("\n")).toContain("NOT post-quantum");
+		expect(printed.join("\n")).toContain("ciphersuite 0x0001");
 	});
 });
 
@@ -881,7 +881,7 @@ describe("group kick — the target is named, and the sentence reports what happ
 	}
 
 	it("names the resolved target and passes the acting admin lazily", async () => {
-		const del = stubKick({ epoch: 7, removedLeaf: true });
+		const del = stubKick({ epoch: 7, removedLeaf: true, escrow: NO_ESCROW });
 
 		await run(["kick", GROUP_ID, ALICE]);
 
@@ -907,19 +907,17 @@ describe("group kick — the target is named, and the sentence reports what happ
 		// did not, so the leaf is already out of the tree. Before the rescue the
 		// client threw here — it could derive an epoch only from a commit it could
 		// no longer make — and the member row was stuck for good.
-		stubKick({ epoch: 9, removedLeaf: false });
+		stubKick({ epoch: 9, removedLeaf: false, escrow: NO_ESCROW });
 
 		await run(["kick", GROUP_ID, ALICE]);
 
 		expect(process.exitCode).toBeUndefined();
 		// The sentence reports what happened, not what a removal usually does —
-		// and it says the narrow, true thing. `removedLeaf: false` is "no leaf
-		// carries the key they publish now", which is not the same fact as "they
-		// hold no leaf": a target that rotated its signing key looks identical.
+		// and it says the narrow, true thing: no leaf in the tree is theirs.
 		expect(printed.join("\n")).toContain(
-			"no leaf in this group's ratchet tree carries the signing key they publish now",
+			"no leaf in this group's ratchet tree is theirs",
 		);
-		expect(printed.join("\n")).toContain("rotated their signing key");
+		expect(printed.join("\n")).not.toContain("rotated");
 		expect(printed.join("\n")).not.toContain("took their leaf out");
 	});
 
@@ -1064,7 +1062,13 @@ describe("group resume-admission", () => {
 				added: 0,
 				outcomes: [],
 				epoch: 9,
-				reclamation: { found: 2, reclaimed: 2, commits: 2, epoch: 9 },
+				reclamation: {
+					found: 2,
+					reclaimed: 2,
+					commits: 2,
+					epoch: 9,
+					escrow: NO_ESCROW,
+				},
 			}),
 		);
 		stubHttp({ get: { [`/groups/${GROUP_ID}`]: group() } });
@@ -1093,6 +1097,7 @@ describe("group resume-admission", () => {
 					reclaimed: 0,
 					commits: 0,
 					epoch: 2,
+					escrow: NO_ESCROW,
 					declined: {
 						reason: "identity_unknown",
 						detail: "Reclaimed nothing: 1 agent(s) publish no readable key.",
@@ -1399,6 +1404,26 @@ describe("group read — a refusal that is really an eviction says so", () => {
 		expect(errors.join("\n")).not.toContain("You were removed");
 	});
 
+	// A sibling in this org is seated, so the server's refusal names that
+	// sibling and the header to retry with: an eviction notice would hide the
+	// one instruction that works.
+	it.each([["get"], ["members"]])(
+		"passes a refusal that names a seated sibling through on `group %s`",
+		async (verb) => {
+			const detail = `Agent ${GROUP_ID} ${core.NOT_A_MEMBER_CLAUSE}; a sibling is seated, ${core.SEATED_SIBLING_CLAUSE}: bot@acme`;
+			vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(() =>
+				Promise.reject(new core.RineApiError(403, detail)),
+			);
+			vi.spyOn(core, "holdsMlsState").mockReturnValue(true);
+
+			await run([verb, GROUP_ID]);
+
+			expect(process.exitCode).toBe(1);
+			expect(errors.join("\n")).not.toContain("You were removed");
+			expect(errors.join("\n")).toContain(core.SEATED_SIBLING_CLAUSE);
+		},
+	);
+
 	it("leaves an unrelated failure alone", async () => {
 		refuseWith(500);
 		const holds = vi.spyOn(core, "holdsMlsState").mockReturnValue(true);
@@ -1472,7 +1497,7 @@ describe("group kick — a rendering-only read never gates the removal", () => {
 		// seated — an admin action blocked by rendering.
 		const del = vi
 			.spyOn(core, "deleteGroupMember")
-			.mockResolvedValue({ epoch: 7, removedLeaf: true });
+			.mockResolvedValue({ epoch: 7, removedLeaf: true, escrow: NO_ESCROW });
 		vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(() =>
 			Promise.reject(apiError("server_error", 500)),
 		);
@@ -1491,7 +1516,7 @@ describe("group kick — a rendering-only read never gates the removal", () => {
 		// passed through — there is no id in it — so it accepts the coupling.
 		const del = vi
 			.spyOn(core, "deleteGroupMember")
-			.mockResolvedValue({ epoch: 7, removedLeaf: true });
+			.mockResolvedValue({ epoch: 7, removedLeaf: true, escrow: NO_ESCROW });
 		const { gets } = stubHttp({ get: { "/groups": { items: [group()] } } });
 
 		await run(["kick", "standup", ALICE]);
@@ -1706,13 +1731,15 @@ describe("an evicted agent naming its group by HANDLE, and the pointer it gets",
 		// green through it.
 		vi.spyOn(core, "holdsAnyMlsState").mockReturnValue(true);
 		// Every rung of the join ladder, all answering nothing: the seated
-		// lookup, the caller's own invitations, then the public directory. The
-		// refusal that falls out of the end opens with the SAME lead the pointer
-		// keys on, which is what makes this arm worth having.
+		// lookup, the caller's own invitations, the open or voted groups its org sits in,
+		// then the public directory. The refusal that falls out of the end opens
+		// with the SAME lead the pointer keys on, which is what makes this arm
+		// worth having.
 		stubHttp({
 			get: {
 				"/groups": { items: [] },
 				"/groups/invites": { items: [] },
+				"/groups/org-joinable": { id: null },
 				"/directory/groups": { items: [], total: 0 },
 			},
 		});
@@ -1727,11 +1754,11 @@ describe("an evicted agent naming its group by HANDLE, and the pointer it gets",
 	});
 });
 
-// ── Item 18 — a completed handle is announced on every verb that resolves one ──
+// ── a completed handle is announced on every verb that resolves one ──
 
 /**
- * Item 18 shipped on `rine discover inspect`; the founder widened it to all
- * seven `resolveToUuid` call sites. These are the three group verbs.
+ * The announcement covers all seven `resolveToUuid` call sites. These are the
+ * three group verbs.
  *
  * `resolveToUuid` completes a short handle and returns a UUID, never the
  * spelling it resolved, so the substitution is invisible at every call site by

@@ -1,0 +1,32 @@
++ * rine - Acme Corp --------- org key +
+| sal~ > bil~  Invoice 4~        now + |
+| #ops - sal~  Deploy fi~         5m + |
+|>sal~ > b~@~  Quote acc~      13:30 + |
+| sal~ > b~@~  No key co~  yesterday ! |
+| #ops - bil~  the sende~        Fri ? |
+| b~@~ > sal~  signature~     14 Oct x |
+| b~@~ > bil~  signed by~   Sep 2025 x |
+|                                      |
++j/k move - enter open - ? help        +
+--- styles ---
+abbbbbbbcccbbbbbbbbbbaaaaaaaaa.........a
+a.....ccc..................ccccccccc.d.a
+a.eeeeccc..................ccccccccc.d.a
+abffffgggffffffffffffffffffgggggggggfh.a
+a.....ccc......iiiiiiiiii..ccccccccc.i.a
+a.eeeeccc......cccccccccc..ccccccccc.i.a
+a.....ccc......cccccccccc..ccccccccc.j.a
+a.....ccc......cccccccccc..ccccccccc.j.a
+a......................................a
+abbbccccccccbbbbbccccccccbccccc........a
+--- legend ---
+a "\u001b[0;96m"
+b "\u001b[0;1;96m"
+c "\u001b[0;90m"
+d "\u001b[0;92m"
+e "\u001b[0;95m"
+f "\u001b[0;1;7m"
+g "\u001b[0;1;7;90m"
+h "\u001b[0;1;7;92m"
+i "\u001b[0;33m"
+j "\u001b[0;91m"

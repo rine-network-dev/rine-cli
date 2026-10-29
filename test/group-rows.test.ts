@@ -1,6 +1,6 @@
 /**
  * `rine group list` / `rine group get` / `rine group members` and the two
- * questions an org-scoped row could not answer on its own.
+ * questions a credential-scoped row could not answer on its own.
  *
  * The thread pointer exists so that an operator (and the agent reading over its
  * shoulder) can go from "which groups am I in" to `rine thread <id>` without

@@ -17,7 +17,12 @@ import { actorOption } from "../actor.js";
 import { announceHandleCompletion } from "../handle-completion.js";
 import { printJson, printTable, printText } from "../output.js";
 import { INVITEE_REQUIRED, collect, dedupeIds } from "./group-args.js";
-import { admitToMls } from "./group-mls.js";
+import {
+	type MlsAdmissionFailure,
+	admissionRan,
+	admitToMls,
+	withAdmission,
+} from "./group-mls-admission.js";
 import {
 	admissionOutcomeRows,
 	admissionRow,
@@ -180,11 +185,11 @@ function singularHead(row: JoinRequestRead): string {
 function printInvited(
 	data: unknown,
 	report: GroupAdmissionReport | null,
-	admission: MlsAdmissionResult | null,
+	admission: MlsAdmissionResult | MlsAdmissionFailure | null,
 	json?: boolean,
 ): void {
 	if (json) {
-		printJson(admission ? { ...(data as object), admission } : data);
+		printJson(withAdmission(data as object, admission));
 		return;
 	}
 	if (report) {
@@ -198,7 +203,7 @@ function printInvited(
 		printText(singularHead(voucher));
 		if (voucher.id) printTable([requestRow(voucher)]);
 	}
-	if (admission && admission.outcomes.length > 0) {
+	if (admissionRan(admission) && admission.outcomes.length > 0) {
 		printText(
 			`\nSeated in the ratchet tree: ${admission.added} of ${admission.outcomes.length}` +
 				` in ${admission.commits} commit(s), now at epoch ${admission.epoch}.`,
@@ -225,7 +230,7 @@ function printInvited(
  * only the manual reclamation pass able to retire the leaf afterwards — and
  * that pass cannot reach it while the row is live. The vote seats the member,
  * and seating is what grants the key: `group vote` posts the add on the approve
- * that carries, which is what the self-application path has always done. The
+ * that carries, as the self-application path does. The
  * notice still goes out, because a nominee that never learns of the nomination
  * can never consent to it.
  *
@@ -238,7 +243,7 @@ async function afterInvite(
 	groupId: string,
 	reached: string[],
 	message: string | undefined,
-): Promise<MlsAdmissionResult | null> {
+): Promise<MlsAdmissionResult | MlsAdmissionFailure | null> {
 	let group: GroupRead;
 	let inviterId: string;
 	try {
@@ -315,7 +320,7 @@ export function registerGroupInvite(program: Command, group: Command): void {
 					const { id: groupId } = await groupTarget(ctx, ref);
 					const agentIds = dedupeIds(
 						await Promise.all(
-							// Item 18: announced per invitee, in the order they were
+							// A completed handle is announced per invitee, in the order they were
 							// typed, before any resolution races.
 							opts.invitee.map((a) => {
 								announceHandleCompletion(a);
@@ -323,11 +328,10 @@ export function registerGroupInvite(program: Command, group: Command): void {
 							}),
 						),
 					);
-					// One agent keeps the wire it has always had — `agent_id`, and a bare
-					// row back. Two or more use `agent_ids` and get one outcome per
-					// requested id, because a batch that refused all 32 over one revoked
-					// agent would be a regression from the singular behaviour at 32x the
-					// blast radius.
+					// One agent sends `agent_id` and gets a bare row back. Two or more
+					// send `agent_ids` and get one outcome per requested id, because a
+					// batch that refused all 32 over one revoked agent would fail 32
+					// invitations for one agent's fault.
 					const single = agentIds.length === 1 ? agentIds[0] : undefined;
 					const body: Record<string, unknown> = single
 						? { agent_id: single }

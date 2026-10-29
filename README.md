@@ -47,7 +47,7 @@ npx @rine-network/cli onboard --email you@yourdomain.com --name "My Org" --slug 
 |---------|-------------|
 | `rine onboard` | Register + create first agent in one step (PoW + key generation) |
 | `rine register` | Register a new organisation (with RSA time-lock PoW) |
-| `rine login / logout / status` | Authentication |
+| `rine logout / status` | Authentication |
 | `rine whoami` | Show current identity, org, agent, and key status |
 | `rine auth token` | Print bearer token (for scripting) |
 | `rine org get / update` | Organisation management |
@@ -55,7 +55,7 @@ npx @rine-network/cli onboard --email you@yourdomain.com --name "My Org" --slug 
 | `rine agent verify <peer>` | Compare a peer's verification words with this agent's, and record the result |
 | `rine agent profile / describe / add-skill / set-categories / set-languages / set-pricing / accept-types` | Agent card management |
 | `rine agent enable-a2a / disable-a2a` | Turn the agent's A2A protocol bridge on or off |
-| `rine keys ...` | Status, generate, rotate, add-pq, export, import E2EE key pairs |
+| `rine keys ...` | Status, rotate, export, import E2EE key pairs |
 | `rine send / read / inbox / reply / thread` | Messaging (with `--payload-file` for file/stdin input) |
 | `rine verify-identity` | Prove a SPIFFE workload identity for an existing agent |
 | `rine wallet create / address / policy [set]` | Payment wallet and spend policy for x402 agent payments |
@@ -65,6 +65,7 @@ npx @rine-network/cli onboard --email you@yourdomain.com --name "My Org" --slug 
 | `rine webhook ...` | Outbound webhook management (rine → a URL you host) |
 | `rine hook ... / rine relay` | Inbound webhook Funnel — hook CRUD (`hook create --tier zero-trust\|shared-edge`) + the relay daemon |
 | `rine discover ...` | Browse and search the agent directory, and the public group directory (`discover groups`, `discover groups inspect`) |
+| `rine tui` | Full-screen reader for every message your org's agents send and receive, with vi keys, search and live updates; needs the org key (`root.key` in the owner directory) on this machine and changes nothing on the server |
 | `rine poll-token` | Generate or revoke inbox polling token |
 | `rine stream` | SSE real-time stream with lifecycle events, persistent mode, heartbeat timeout |
 
@@ -98,8 +99,7 @@ The CLI resolves its config directory in order: `$RINE_CONFIG_DIR` > `~/.config/
 | `RINE_API_URL` | API base URL (default: `https://rine.network`) |
 | `RINE_CONFIG_DIR` | Config directory path |
 | `RINE_AGENT` | Which agent commands act as (name, handle, or agent ID) |
-| `RINE_CLIENT_ID` | Client ID (overrides stored credentials) |
-| `RINE_CLIENT_SECRET` | Client secret (overrides stored credentials) |
+| `RINE_OWNER_DIR` | Owner directory holding `root.key` and the recovery phrase (default `~/.config/rine-owner`) |
 | `RINE_TOKEN` | Bearer token (skip auth flow entirely) |
 
 ## Requirements

@@ -47,7 +47,7 @@ function quoteMessage(
 		from_agent_id: PAYEE,
 		to_agent_id: PAYER,
 		encrypted_payload: "ciphertext-quote",
-		encryption_version: "hpke-v1",
+		encryption_version: "hpke-hybrid-v2",
 		created_at: "2026-07-17T00:00:00Z",
 		...overrides,
 	} as unknown as core.MessageRead;
@@ -73,10 +73,8 @@ beforeEach(() => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: PAYER, name: "payer" },
@@ -111,13 +109,9 @@ beforeEach(() => {
 		verified: true,
 		verificationStatus: "verified",
 	} as never);
-	vi.spyOn(core, "fetchRecipientKeys").mockResolvedValue({
-		encryption: new Uint8Array(32),
-		pqEncryption: undefined,
-	} as never);
-	vi.spyOn(core, "encryptMessage").mockResolvedValue({
+	vi.spyOn(core, "sealForAgent").mockResolvedValue({
 		encrypted_payload: "ciphertext-payment",
-		encryption_version: "hpke-v1",
+		encryption_version: "hpke-hybrid-v2",
 		sender_signing_kid: `rine:${PAYER}`,
 	} as never);
 });
@@ -182,6 +176,13 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		expect(args[4]).toBe(PAYEE);
 	});
 
+	it("opens the quote under the key generation current at its created_at", async () => {
+		await run("pay", MESSAGE_ID);
+		const args = (core.decryptMessage as ReturnType<typeof vi.fn>).mock
+			.calls[0] as unknown[];
+		expect(args[6]).toBe("2026-07-17T00:00:00Z");
+	});
+
 	it("attaches the payment-submitted status marker (no economic detail)", async () => {
 		await run("pay", MESSAGE_ID);
 		const meta = postBody?.metadata as Record<string, unknown>;
@@ -199,16 +200,21 @@ describe("rine pay — happy path (policy + real signing)", () => {
 		await run("pay", MESSAGE_ID);
 		// The PaymentPayload we sealed carries the quote-ref extension so the payee
 		// can bind this settlement to the ONE quote it authored.
-		const pp = (core.encryptMessage as ReturnType<typeof vi.fn>).mock.calls.at(
+		const pp = (core.sealForAgent as ReturnType<typeof vi.fn>).mock.calls.at(
 			0,
 		)?.[3] as core.PaymentPayload;
 		expect(pp.extensions?.[core.X402_QUOTE_REF_KEY]).toBe(MESSAGE_ID);
+		// Sealed by the payer, scoped to the payee who authored the quote.
+		expect(vi.mocked(core.sealForAgent).mock.calls[0]?.[2]).toEqual({
+			senderAgentId: PAYER,
+			recipientAgentId: PAYEE,
+		});
 	});
 
 	it("signs the payment over the payer's real wallet key (recovers to wallet)", async () => {
 		await run("pay", MESSAGE_ID);
-		// The encrypted payload we sent is the PaymentPayload passed to encryptMessage.
-		const pp = (core.encryptMessage as ReturnType<typeof vi.fn>).mock.calls.at(
+		// The encrypted payload we sent is the PaymentPayload passed to sealForAgent.
+		const pp = (core.sealForAgent as ReturnType<typeof vi.fn>).mock.calls.at(
 			0,
 		)?.[3] as core.PaymentPayload;
 		const from = pp.payload.authorization.from;
@@ -271,10 +277,24 @@ describe("rine pay — sender binding on the money path", () => {
 
 		expect(process.exitCode).toBe(1);
 		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
-		expect(core.encryptMessage).not.toHaveBeenCalled();
+		expect(core.sealForAgent).not.toHaveBeenCalled();
 		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
 		// The operator is told which agent actually signed it.
 		expect(errorOutput()).toContain(RESEALER);
+	});
+
+	it("refuses a quote whose sender could not be verified (exit 1, nothing signed or spent)", async () => {
+		// A key-lookup outage reads `unverifiable` and still carries the body: a
+		// hostile server could forge a quote under any agent in that window, so the
+		// wallet waits for a verified one.
+		resealedQuote("unverifiable");
+
+		await run("pay", MESSAGE_ID);
+
+		expect(process.exitCode).toBe(1);
+		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
+		expect(core.sealForAgent).not.toHaveBeenCalled();
+		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
 	});
 
 	it("refuses a quote addressed to a sibling, naming the addressee (exit 1)", async () => {
@@ -292,7 +312,7 @@ describe("rine pay — sender binding on the money path", () => {
 		expect(errorOutput()).toContain(RESEALER);
 		// Nothing local was opened, signed or spent.
 		expect(core.decryptMessage).not.toHaveBeenCalled();
-		expect(core.encryptMessage).not.toHaveBeenCalled();
+		expect(core.sealForAgent).not.toHaveBeenCalled();
 		expect(core.HttpClient.prototype.post).not.toHaveBeenCalled();
 		expect(core.readDailySpent(CONFIG_DIR, PAYER)).toBe(0n);
 	});

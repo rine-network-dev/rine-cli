@@ -52,10 +52,8 @@ beforeEach(() => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine");
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue("https://test.rine.network");
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core.HttpClient.prototype, "get").mockImplementation(
 		(path: string) => {

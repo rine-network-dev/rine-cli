@@ -1,4 +1,4 @@
-// Item 18 — `rine discover inspect` announces the handle it actually looked up.
+// `rine discover inspect` announces the handle it actually looked up.
 //
 // `resolveToUuid` applies `normalizeHandle`, so a caller who types `kofi@acme`
 // reaches WebFinger as `kofi@acme.rine.network` and — before this — was told

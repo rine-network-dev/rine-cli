@@ -1,15 +1,21 @@
 import type { Command } from "commander";
 import {
 	type AgentRead,
-	type CredentialEntry,
+	type CustodyDirs,
+	DEFAULT_PROFILE,
 	type HttpClient,
+	type ResolvedAuth,
 	type TokenFn,
 	HttpClient as HttpClientClass,
 	formatError,
-	getCredentialEntry,
 	getOrRefreshToken,
+	inBackground,
+	ownIdentityFor,
 	resolveApiUrl,
+	resolveAuth,
 	resolveConfigDir,
+	resolveOwnerDir,
+	startupEscrowSweep,
 } from "@rine-network/core";
 import { actorLadder } from "./acting-agent.js";
 import { commandOf, namedActor } from "./actor.js";
@@ -21,6 +27,10 @@ export type ActionContext = {
 	gOpts: GlobalOpts;
 	profileName: string;
 	configDir: string;
+	/** The owner dir: where `root.key` lives, never the runtime config dir. */
+	ownerDir: string;
+	/** Undefined before onboarding. */
+	auth: ResolvedAuth | undefined;
 	apiUrl: string;
 	/**
 	 * The client's own default headers, held by reference — writing one here
@@ -61,24 +71,50 @@ type ActionFn = (ctx: ActionContext, ...args: any[]) => Promise<void>;
 // biome-ignore lint/suspicious/noExplicitAny: commander passes heterogeneous positional args
 type WrappedFn = (...args: any[]) => Promise<void>;
 
+/** A client plus the identity it acts as and a way to mint its bearer token. */
+export type CreatedClient = {
+	client: HttpClientClass;
+	profileName: string;
+	dirs: CustodyDirs;
+	/** Undefined before onboarding: this dir holds no identity to act as. */
+	auth: ResolvedAuth | undefined;
+	/** The bearer token for this identity (`RINE_TOKEN` wins), refreshed on demand. */
+	token: (opts?: { force?: boolean; refreshMargin?: number }) => Promise<string>;
+};
+
+/** The runtime config dir and the owner dir, as the environment resolves them. */
+export function resolveDirs(): CustodyDirs {
+	return { configDir: resolveConfigDir(), ownerDir: resolveOwnerDir() };
+}
+
+// The MCP twin is `createServerContext` in `rine-mcp/src/context.ts`. The two
+// differ on purpose: a CLI invocation resolves its identity once and is gone,
+// while the MCP server is long-lived and re-resolves it after onboarding.
 async function createClient(
-	configDir: string,
 	apiUrl: string,
 	profileFlag?: string,
 	defaultHeaders?: Record<string, string>,
-): Promise<{
-	client: HttpClientClass;
-	profileName: string;
-	entry: CredentialEntry | undefined;
-}> {
-	const profileName = profileFlag ?? "default";
-	const entry = getCredentialEntry(configDir, profileName);
+): Promise<CreatedClient> {
+	const dirs = resolveDirs();
+	const profileName = profileFlag ?? DEFAULT_PROFILE;
+	const auth = resolveAuth(dirs, profileFlag);
 	const envToken = process.env.RINE_TOKEN;
-	const canRefresh = !envToken && entry !== undefined;
-	const tokenFn: TokenFn = (force = false) =>
-		getOrRefreshToken(configDir, apiUrl, entry, profileName, { force, envToken });
-	const client = new HttpClientClass({ tokenFn, apiUrl, canRefresh, defaultHeaders });
-	return { client, profileName, entry };
+	const token: CreatedClient["token"] = (opts = {}) =>
+		getOrRefreshToken(auth?.cacheDir ?? dirs.configDir, apiUrl, auth?.signer, {
+			force: opts.force ?? false,
+			envToken,
+			refreshMargin: opts.refreshMargin,
+		});
+	const tokenFn: TokenFn = (force = false) => token({ force });
+	const client = new HttpClientClass({
+		tokenFn,
+		apiUrl,
+		canRefresh: !envToken,
+		defaultHeaders,
+		ownIdentity: ownIdentityFor(dirs.configDir, auth),
+	});
+	inBackground(() => startupEscrowSweep(client, dirs.configDir, auth?.agentId));
+	return { client, profileName, dirs, auth, token };
 }
 
 export { createClient };
@@ -102,11 +138,9 @@ export function withClient(
 			// Conflicting spellings first: two that disagree refuse before
 			// either can reach a header, and before the call costs a round trip.
 			const flagged = namedActor(commandOf(args), gOpts);
-			const configDir = resolveConfigDir();
 			const apiUrl = resolveApiUrl();
 			const defaultHeaders: Record<string, string> = {};
-			const { client, profileName } = await createClient(
-				configDir,
+			const { client, profileName, dirs, auth } = await createClient(
 				apiUrl,
 				gOpts.profile,
 				defaultHeaders,
@@ -135,7 +169,9 @@ export function withClient(
 					client,
 					gOpts,
 					profileName,
-					configDir,
+					configDir: dirs.configDir,
+					ownerDir: dirs.ownerDir,
+					auth,
 					apiUrl,
 					extraHeaders: defaultHeaders,
 					agents,

@@ -118,7 +118,7 @@ function paymentMessage(
 		from_agent_id: PAYER,
 		to_agent_id: PAYEE,
 		encrypted_payload: "ciphertext-payment",
-		encryption_version: "hpke-v1",
+		encryption_version: "hpke-hybrid-v2",
 		created_at: "2026-07-20T00:00:00Z",
 		...overrides,
 	} as unknown as core.MessageRead;
@@ -137,10 +137,8 @@ beforeEach(() => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue("/tmp/test-rine-fulfill");
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: PAYEE, name: "payee" },
@@ -230,6 +228,13 @@ describe("rine fulfill — happy path (ref-bind → settle → receipt)", () => 
 			.calls[0] as unknown[];
 		// Never the kid or the `sender_signing_kid` header the sender supplied.
 		expect(args[4]).toBe(PAYER);
+	});
+
+	it("opens the payment under the key generation current at its created_at", async () => {
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+		const args = (core.decryptMessage as ReturnType<typeof vi.fn>).mock
+			.calls[0] as unknown[];
+		expect(args[6]).toBe("2026-07-20T00:00:00Z");
 	});
 
 	it("binds the settle to the answered payment + conversation + payee", async () => {
@@ -389,6 +394,20 @@ describe("rine fulfill — sender binding on the money path", () => {
 			code: core.X402_ERROR.INAUTHENTIC_SENDER,
 			receipt_id: "receipt-msg-1",
 		});
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("leaves the thread open, with no receipt, when the payer's key could not be read", async () => {
+		resealedPayment("unverifiable");
+
+		await run("fulfill", MESSAGE_ID, "--facilitator", "https://fac.test");
+
+		// Nothing is settled and no terminal receipt is sent: the same payment is
+		// fulfilled once the key lookup works, exactly like a facilitator outage.
+		expect(core.resolvePayeeRequirement).not.toHaveBeenCalled();
+		expect(core.settleToReceipt).not.toHaveBeenCalled();
+		expect(core.sendReceipt).not.toHaveBeenCalled();
+		expect(lastJson()).toMatchObject({ status: "sender-unverifiable" });
 		expect(process.exitCode).toBe(1);
 	});
 

@@ -46,7 +46,9 @@ function makeProgram(globalOpts: Record<string, unknown> = {}): {
 	vi.spyOn(actionModule, "createClient").mockResolvedValue({
 		client: client as unknown as core.HttpClient,
 		profileName: "default",
-		entry: undefined,
+		dirs: { configDir: "/tmp/test-rine-config", ownerDir: "/tmp/test-rine-owner" },
+		auth: undefined,
+		token: vi.fn(async () => "test-token"),
 	});
 
 	const program = new Command();

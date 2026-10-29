@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isActorOption } from "../src/actor.js";
 import { registerGroup } from "../src/commands/group.js";
+import { NO_ESCROW } from "./escrow-report.js";
 
 /**
  * Every `rine group` verb that DECLARES the actor flag also puts it on the wire.
@@ -106,7 +107,13 @@ const PENDING_REQUEST = {
 };
 
 /** What a stubbed `initMlsGroup` reports back to the verbs that call it. */
-const ADMISSION = { epoch: 1, commits: 1, added: 0, outcomes: [] };
+const ADMISSION = {
+	epoch: 1,
+	commits: 1,
+	added: 0,
+	outcomes: [],
+	escrow: NO_ESCROW,
+};
 
 /** Every request that reached the network, with the headers it carried. */
 let requests: {
@@ -214,10 +221,8 @@ function wire(respond: Responder): Command {
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([ALICE, BOB]);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	} as core.CredentialEntry);
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
 		requests.push({

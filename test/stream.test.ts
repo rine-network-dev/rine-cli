@@ -12,7 +12,6 @@ vi.mock("@rine-network/core", async (importOriginal) => ({
 	resolveApiUrl: vi.fn(() => "http://localhost:7001"),
 	fetchAgents: vi.fn(async () => [{ id: "agent-1", name: "bot" }]),
 	resolveAgent: vi.fn(async () => ({ agentId: "agent-1" })),
-	getOrRefreshToken: vi.fn(async () => "fake-token"),
 	jitteredRefreshMargin: vi.fn(() => 60),
 	formatError: vi.fn((e: unknown) => String(e)),
 	agentKeysExist: vi.fn(() => false),
@@ -29,7 +28,9 @@ vi.mock("../src/action.js", () => ({
 	createClient: vi.fn(async () => ({
 		client: { get: vi.fn(), post: vi.fn() },
 		profileName: "default",
-		entry: { client_id: "c", client_secret: "s" },
+		dirs: { configDir: "/fake/config", ownerDir: "/fake/owner" },
+		auth: undefined,
+		token: vi.fn(async () => "fake-token"),
 	})),
 }));
 
@@ -41,6 +42,8 @@ vi.mock("../src/commands/stream-cursor.js", () => ({
 	loadStreamCursor: vi.fn(() => undefined),
 	saveStreamCursor: vi.fn(),
 }));
+
+const CREATED_AT = "2026-10-01T12:00:00Z";
 
 import { createEventSource } from "eventsource-client";
 import { Command } from "commander";
@@ -357,6 +360,27 @@ describe("rine stream", () => {
 			expect(connectingEvents[0].data.attempt).toBe(1);
 			expect(connectingEvents[1].data.attempt).toBe(2);
 			expect(connectingEvents[2].data.attempt).toBe(3);
+		});
+
+		it("holds one SIGINT listener however many times it reconnects", async () => {
+			const out = captureStdout();
+
+			for (let i = 0; i < 3; i++) {
+				mockCreateEventSource.mockImplementationOnce(makeMockEs((_opts) => {
+					Promise.resolve().then(() => _opts.onDisconnect?.());
+				}));
+			}
+
+			const program = makeProgram();
+			await program.parseAsync(["node", "rine", "stream", "--json"]);
+			out.restore();
+
+			expect(sigintListeners).toHaveLength(1);
+			const stopped = out.lines
+				.filter((l) => l.includes('"lifecycle"'))
+				.map((l) => JSON.parse(l))
+				.find((e: any) => e.data.state === "stopped");
+			expect(stopped?.data.reason).toBe("signal");
 		});
 
 		it("human-readable mode writes connect message to stderr", async () => {
@@ -739,6 +763,50 @@ describe("rine stream", () => {
 			encrypted_payload: `AQID${n}`,
 		});
 
+		const CLEARTEXT_EVENT = {
+			from_agent_id: PEER_ID,
+			type: "rine.v1.a2a_message",
+			encryption_version: "none",
+			// One text part "plain", as the server serves it: unpadded base64url.
+			encrypted_payload: "W3sidGV4dCI6ICJwbGFpbiJ9XQ",
+			created_at: CREATED_AT,
+		};
+
+		it("test_stream_when_the_message_is_a2a_cleartext_then_the_line_says_so_and_nothing_is_decrypted", async () => {
+			const line = await previewOf(CLEARTEXT_EVENT);
+
+			expect(line).toContain("[?] [Received as A2A cleartext");
+			expect(line).toContain("plain");
+			expect(line).not.toContain("[encrypted]");
+			expect(mockDecryptDm).not.toHaveBeenCalled();
+		});
+
+		it("test_stream_json_when_the_message_is_a2a_cleartext_then_the_envelope_carries_the_flag", async () => {
+			const out = captureStdout();
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				Promise.resolve().then(() => {
+					opts.onMessage({
+						event: "message",
+						data: JSON.stringify(CLEARTEXT_EVENT),
+						id: null,
+					});
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			await makeProgram().parseAsync(["node", "rine", "stream", "--json"]);
+			out.restore();
+
+			// The lifecycle lines share stdout; the message envelope is the one that carries data.
+			const envelope = out.lines
+				.map((l) => JSON.parse(l))
+				.find((l) => l.event === "message");
+			expect(envelope.a2a_cleartext).toBe(true);
+			expect(envelope.a2a_cleartext_notice).toContain("not end-to-end encrypted");
+		});
+
 		it("decrypts an mls-v1 group message", async () => {
 			mockDecryptGroup.mockResolvedValue(decrypted("group-mls-hello"));
 
@@ -749,6 +817,7 @@ describe("rine stream", () => {
 				group_handle: "team",
 				encryption_version: "mls-v1",
 				encrypted_payload: "AQID",
+				created_at: CREATED_AT,
 			});
 
 			// The recovery's own argument order: the client leads, because the
@@ -760,26 +829,31 @@ describe("rine stream", () => {
 				"group-1",
 				"AQID",
 				PEER_ID,
+				CREATED_AT,
 			);
 			expect(line).toContain("[\u2713] group-mls-hello");
 		});
 
-		it("decrypts an hpke-hybrid-v1 direct message", async () => {
+		it("decrypts an hpke-hybrid-v2 direct message", async () => {
 			mockDecryptDm.mockResolvedValue(decrypted("dm-hybrid-hello"));
 
 			const line = await previewOf({
 				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
-				encryption_version: "hpke-hybrid-v1",
+				encryption_version: "hpke-hybrid-v2",
 				encrypted_payload: "AwQF",
+				created_at: CREATED_AT,
 			});
 
+			// The row's own created_at selects the key generation.
 			expect(mockDecryptDm).toHaveBeenCalledWith(
 				"/fake/config",
 				"agent-1",
 				"AwQF",
 				expect.anything(),
 				PEER_ID,
+				"agent-1",
+				CREATED_AT,
 			);
 			expect(line).toContain("[\u2713] dm-hybrid-hello");
 		});
@@ -882,13 +956,13 @@ describe("rine stream", () => {
 			expect(line).not.toContain("[encrypted]");
 		});
 
-		it("reports [decrypt failed] when an hpke-hybrid-v1 message cannot be decrypted", async () => {
+		it("reports [decrypt failed] when an hpke-hybrid-v2 message cannot be decrypted", async () => {
 			mockDecryptDm.mockRejectedValue(new Error("no PQ encryption key"));
 
 			const line = await previewOf({
 				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
-				encryption_version: "hpke-hybrid-v1",
+				encryption_version: "hpke-hybrid-v2",
 				encrypted_payload: "AwQF",
 			});
 
@@ -907,7 +981,7 @@ describe("rine stream", () => {
 			const line = await previewOf({
 				from_agent_id: PEER_ID,
 				type: "rine.v1.dm",
-				encryption_version: "hpke-hybrid-v1",
+				encryption_version: "hpke-hybrid-v2",
 				encrypted_payload: "AwQF",
 			});
 
@@ -918,13 +992,43 @@ describe("rine stream", () => {
 		it("leaves an event with no server-authenticated sender sealed", async () => {
 			const line = await previewOf({
 				type: "rine.v1.dm",
-				encryption_version: "hpke-hybrid-v1",
+				encryption_version: "hpke-hybrid-v2",
 				encrypted_payload: "AwQF",
 			});
 
 			expect(line).toContain("[encrypted]");
 			expect(mockDecryptDm).not.toHaveBeenCalled();
 		});
+
+		// Which versions the preview tries to open, and what a failed open prints.
+		it.each([
+			["hpke-hybrid-v2", undefined, "dm", "[decrypt failed]"],
+			["sender-key-v1", "group-1", "group", "[decrypt failed]"],
+			["mls-v1", "group-1", "group", "[decrypt failed]"],
+			["sender-key-v1", undefined, "none", "[decrypt failed]"],
+			["mls-v1", undefined, "none", "[decrypt failed]"],
+			["hpke-v1", undefined, "none", "[encrypted]"],
+			["none", undefined, "none", "[encrypted]"],
+			[undefined, undefined, "none", "[encrypted]"],
+		])(
+			"a failed open of version %s (group %s) goes to the %s decrypt and prints %s",
+			async (version, groupId, decrypt, preview) => {
+				mockDecryptDm.mockRejectedValue(new Error("cannot open"));
+				mockDecryptGroup.mockRejectedValue(new Error("cannot open"));
+
+				const line = await previewOf({
+					from_agent_id: PEER_ID,
+					type: "rine.v1.dm",
+					group_id: groupId,
+					encryption_version: version,
+					encrypted_payload: "AwQF",
+				});
+
+				expect(line.endsWith(`: ${preview}`)).toBe(true);
+				expect(mockDecryptDm).toHaveBeenCalledTimes(decrypt === "dm" ? 1 : 0);
+				expect(mockDecryptGroup).toHaveBeenCalledTimes(decrypt === "group" ? 1 : 0);
+			},
+		);
 
 		it("leaves an unsupported encryption version as [encrypted]", async () => {
 			const line = await previewOf({

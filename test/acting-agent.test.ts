@@ -65,7 +65,7 @@ function answerFor(url: string): unknown {
 			to_agent_id: BOB.id,
 			type: "rine.v1.task_request",
 			encrypted_payload: "sealed",
-			encryption_version: "hpke-v1",
+			encryption_version: "hpke-hybrid-v2",
 			created_at: "2026-01-01T00:00:00Z",
 		};
 	}
@@ -78,10 +78,8 @@ function wire(agents: core.AgentRead[]): Command {
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
 	vi.spyOn(core, "fetchAgents").mockResolvedValue(agents);
 	vi.spyOn(core, "agentKeysExist").mockReturnValue(false);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	} as core.CredentialEntry);
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
 		requests.push({

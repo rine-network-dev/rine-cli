@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { withClient } from "../action.js";
 import {
 	type AgentRead,
+	DEFAULT_PROFILE,
 	type ListResponse,
 	RineApiError,
 	compareVerificationWordsForAgent,
@@ -31,7 +32,7 @@ export function registerAgent(program: Command): void {
 			withClient(
 				program,
 				async (
-					{ client, gOpts, configDir },
+					{ client, gOpts, configDir, ownerDir },
 					opts: { name?: string; humanOversight?: boolean; unlisted?: boolean },
 				) => {
 					let name = opts.name;
@@ -44,8 +45,8 @@ export function registerAgent(program: Command): void {
 						}
 					}
 
-					const profile = gOpts.profile ?? "default";
-					const data = await performAgentCreation(client, configDir, profile, {
+					const profile = gOpts.profile ?? DEFAULT_PROFILE;
+					const data = await performAgentCreation(client, { configDir, ownerDir }, profile, {
 						name,
 						humanOversight: opts.humanOversight,
 						unlisted: opts.unlisted,

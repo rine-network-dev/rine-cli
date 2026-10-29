@@ -75,10 +75,8 @@ function wire(
 		agentListFetches += 1;
 		return agents();
 	});
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	} as core.CredentialEntry);
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.stubGlobal("fetch", () =>
 		Promise.resolve(

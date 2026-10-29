@@ -2,11 +2,13 @@
 //
 // FROZEN-CONTRACT invariants asserted here (a violation is a build defect):
 //  - The HMAC secret is generated CLIENT-SIDE (randomBytes(32) hex, 64 chars)
-//    and is NEVER sent to rine — the create POST body carries ONLY {hook_name}.
+//    and is NEVER sent to rine — the create POST body carries ONLY
+//    {hook_name, tier}.
 //    (We spy the HttpClient.post body and assert no secret key is ever present.)
 //  - The secret is persisted to {configDir}/funnel/{agentId}/{name}.secret with
-//    mode 0600 (dir 0700) BEFORE anything is printed, and deleted if the POST
-//    fails (no orphan secret for an unallocated hook).
+//    mode 0600 (dir 0700) BEFORE anything is printed, and put back the way it
+//    was if the POST fails (no orphan secret for an unallocated hook, and an
+//    existing hook keeps the secret it already uses).
 //  - The secret is printed EXACTLY ONCE on create and NEVER appears in `list`.
 //  - HOOK_DNS_API_TOKEN never appears in this surface (server-side only).
 //
@@ -55,10 +57,8 @@ beforeEach(() => {
 
 	vi.spyOn(core, "resolveConfigDir").mockReturnValue(CONFIG_DIR);
 	vi.spyOn(core, "resolveApiUrl").mockReturnValue(API_URL);
-	vi.spyOn(core, "getCredentialEntry").mockReturnValue({
-		client_id: "test-id",
-		client_secret: "test-secret",
-	});
+	vi.spyOn(core, "resolveOwnerDir").mockReturnValue("/tmp/test-rine-owner");
+	vi.spyOn(core, "resolveAuth").mockReturnValue(undefined);
 	vi.spyOn(core, "getOrRefreshToken").mockResolvedValue("test-token");
 	vi.spyOn(core, "fetchAgents").mockResolvedValue([
 		{ id: AGENT_ID, name: "bot" },
@@ -115,7 +115,7 @@ describe("rine hook — command group", () => {
 // ── client-side secret, body-has-no-secret ──────────────────────────────────
 
 describe("rine hook create — client-side secret never sent to rine", () => {
-	it("POST body is exactly {hook_name} — no secret key is ever present", async () => {
+	it("POST body is exactly {hook_name, tier} — no secret key is ever present", async () => {
 		let postBody: Record<string, unknown> | undefined;
 		const post = vi
 			.spyOn(core.HttpClient.prototype, "post")
@@ -287,6 +287,29 @@ describe("rine hook create — local secret persistence", () => {
 		]);
 
 		expect(fs.existsSync(secretPath("github"))).toBe(false);
+		expect(process.exitCode).not.toBe(0);
+	});
+
+	it("keeps the secret an existing hook already uses if the allocation POST fails", async () => {
+		const prior = "a".repeat(64);
+		core.saveHookSecret(CONFIG_DIR, AGENT_ID, "github", prior);
+		vi.spyOn(core.HttpClient.prototype, "post").mockRejectedValue(
+			new core.RineApiError(409, "Funnel hook already exists"),
+		);
+
+		const program = makeProgram({ json: true });
+		await program.parseAsync([
+			"node",
+			"rine",
+			"hook",
+			"create",
+			"--agent",
+			AGENT_ID,
+			"--name",
+			"github",
+		]);
+
+		expect(fs.readFileSync(secretPath("github"), "utf-8").trim()).toBe(prior);
 		expect(process.exitCode).not.toBe(0);
 	});
 });

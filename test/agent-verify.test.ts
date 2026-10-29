@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgent } from "../src/commands/agent.js";
 import * as outputModule from "../src/output.js";
 import * as promptModule from "../src/prompt.js";
+import { derivedAgentKeys } from "./derived-keys.js";
 
 /**
  * `rine agent verify` — the compare-and-confirm half of identity verification.
@@ -59,7 +60,7 @@ const ARGS = ["node", "rine", "agent", "verify", "bot@acme"];
 
 beforeEach(() => {
 	configDir = fs.mkdtempSync(join(tmpdir(), "rine-cli-verify-"));
-	const keys = core.generateAgentKeys();
+	const keys = derivedAgentKeys(OWN_ID);
 	core.saveAgentKeys(configDir, OWN_ID, keys);
 	ownWords = core.verificationWordsForKey(keys.signing.publicKey);
 
@@ -199,7 +200,7 @@ describe("rine agent verify", () => {
 		expect(process.exitCode).toBe(2);
 	});
 
-	// ── Item 18 — the peer spelling that was actually looked up ──────────────
+	// ── the peer spelling that was actually looked up ────────────────────────
 
 	/**
 	 * `resolveToUuid` completes `bot@acme` to `bot@acme.rine.network` and hands

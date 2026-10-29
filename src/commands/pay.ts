@@ -25,15 +25,14 @@ import {
 	buildPaymentMessage,
 	buildPaymentPayload,
 	decryptMessage,
-	encryptMessage,
-	fetchRecipientKeys,
 	isAutoPayable,
 	loadPolicy,
 	loadWalletKey,
 	parseX402Payload,
 	readDailySpent,
-	requireAuthenticPlaintext,
+	requireVerifiedPlaintext,
 	reserveSpend,
+	sealForAgent,
 	selectRequirement,
 	walletKeyExists,
 } from "@rine-network/core";
@@ -120,7 +119,7 @@ export function registerPay(program: Command): void {
 					}
 					if (!agentKeysExist(configDir, payerAgentId)) {
 						printError(
-							`No E2EE keys for agent ${payerAgentId}. Run 'rine keys generate' first.`,
+							`No E2EE keys for agent ${payerAgentId}. Run 'rine org recover' to restore this agent's keys.`,
 						);
 						process.exitCode = 1;
 						return;
@@ -142,6 +141,8 @@ export function registerPay(program: Command): void {
 						message.encrypted_payload,
 						client,
 						payeeAgentId,
+						payerAgentId,
+						message.created_at,
 					);
 					// A quote is only the payee's word when the payee signed it: an
 					// envelope re-sealed by a third party is refused here, before the
@@ -150,7 +151,7 @@ export function registerPay(program: Command): void {
 					try {
 						pr = parseX402Payload(
 							message.type,
-							requireAuthenticPlaintext(decrypted, payeeAgentId, messageId),
+							requireVerifiedPlaintext(decrypted, payeeAgentId, messageId),
 						) as PaymentRequired;
 					} catch (err) {
 						if (!(err instanceof X402Error)) throw err;
@@ -192,16 +193,11 @@ export function registerPay(program: Command): void {
 							{ emitMarker: opts.marker !== false },
 						);
 
-						const recipientKeys = await fetchRecipientKeys(
+						const encrypted = await sealForAgent(
 							client,
-							payeeAgentId,
-						);
-						const encrypted = await encryptMessage(
 							configDir,
-							payerAgentId,
-							recipientKeys.encryption,
+							{ senderAgentId: payerAgentId, recipientAgentId: payeeAgentId },
 							built.payload,
-							recipientKeys.pqEncryption,
 						);
 
 						const body: Record<string, unknown> = {
