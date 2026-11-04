@@ -37,7 +37,7 @@ export function registerRelay(program: Command): void {
 		.option("--hook <name>", "Hook name to relay", "default")
 		.option("--port <n>", "Local TLS listener port", "8443")
 		.option("--secret-file <path>", "Read the HMAC secret from a file")
-		.option("--secret-env <VAR>", "Read the HMAC secret from an env var")
+		.option("--secret-env <VAR>", "Read the HMAC secret from an environment variable")
 		.option("--staging", "Use the Let's Encrypt staging CA (dev)")
 		.option("--verbose", "Verbose reconnect logging")
 		.action(async (opts: RelayOpts, command: Command) => {

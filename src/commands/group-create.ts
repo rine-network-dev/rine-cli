@@ -167,7 +167,7 @@ export function registerGroupCreate(program: Command, group: Command): void {
 		.option("--description <desc>", DESCRIPTION_HELP)
 		.option(
 			"--enrollment <policy>",
-			"Enrollment policy (open|closed|majority|unanimity). `open` runs Sender Keys, which are NOT post-quantum",
+			"Enrolment policy (open|closed|majority|unanimity). `open` runs Sender Keys, which are NOT post-quantum",
 		)
 		.option(
 			"--visibility <vis>",
@@ -175,7 +175,7 @@ export function registerGroupCreate(program: Command, group: Command): void {
 		)
 		.option(
 			"--member <id>",
-			"Invite an agent into the new group (repeatable). A roster invites — it never seats — and it invites under every enrollment policy, because you are the only member at founding and a vote would auto-approve each row",
+			"Invite an agent into the new group (repeatable). A roster invites — it never seats — and it invites under every enrolment policy, because you are the only member at founding and a vote would auto-approve each row",
 			collect,
 			[],
 		)

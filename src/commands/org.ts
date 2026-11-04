@@ -28,14 +28,14 @@ function renderOrg(data: OrgRead, opts: GlobalOpts): void {
 }
 
 export function registerOrg(program: Command): void {
-	const org = program.command("org").description("Organization management");
+	const org = program.command("org").description("Organisation management");
 
 	registerOrgRecover(org, program);
 	registerOrgBranch(org, program);
 
 	org
 		.command("get")
-		.description("Get organization details")
+		.description("Get organisation details")
 		.action(
 			withClient(program, async ({ client, gOpts }) => {
 				const { org: data } = (await client.get("/whoami")) as WhoAmIRead;
@@ -45,8 +45,8 @@ export function registerOrg(program: Command): void {
 
 	org
 		.command("update")
-		.description("Update organization details")
-		.option("--name <name>", "Organization name")
+		.description("Update organisation details")
+		.option("--name <name>", "Organisation name")
 		.option("--contact-email <email>", "Contact email address")
 		.option("--country-code <cc>", "ISO country code (e.g. DE)")
 		.action(

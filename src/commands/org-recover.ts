@@ -103,7 +103,7 @@ export function registerOrgRecover(org: Command, program: Command): void {
 		.description("Rebuild this device from the 24-word recovery phrase")
 		.option(
 			"--owner-only",
-			"Write only the org root and profile into the owner dir: no request, no leaf keys, no group reseat",
+			"Write only the org root and profile into the owner directory: no request, no leaf keys, no group reseat",
 		)
 		.action(
 			withErrorHandler(program, async (gOpts, opts: RecoverOpts) => {
@@ -143,7 +143,7 @@ export function registerOrgRecover(org: Command, program: Command): void {
 			withErrorHandler(program, () => {
 				if (process.stdout.isTTY !== true) {
 					printError(
-						"rine org phrase shows the phrase on a terminal only; the phrase file is in the owner dir.",
+						"rine org phrase shows the phrase on a terminal only; the phrase file is in the owner directory.",
 					);
 					process.exitCode = 2;
 					return;

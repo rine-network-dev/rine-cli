@@ -23,11 +23,10 @@
  *    `opts.peek`", which is the assertion a declared-but-unwired flag passes.
  *    The rule is `test/actor-flag-consumed.test.ts`'s, rule 3, and it is the
  *    same rule for the same reason.
- * 2. **The negative is asserted.** Without the flag the request must carry no
- *    `X-Rine-Peek` key at all — absent, not `"0"`. The server parses both as
- *    false, but a test that only checked the positive could not tell a working
- *    flag from a header wired on unconditionally, which is the mistake that
- *    would silently stop every `rine read` from marking anything delivered.
+ * 2. **The mark is asserted too.** Every read fetches as a peek and marks the
+ *    message itself, so the header alone proves nothing: a read that opens must
+ *    produce exactly one `mark-delivered` POST, and `--peek`, an unopenable row
+ *    and a refused-for-keys row must produce none.
  * 3. **The header object is asserted FRESH.** `client.get`'s third argument must
  *    hold the peek header and nothing else. The shared object it must not be is
  *    the client's own default headers, which by then already carry
@@ -68,13 +67,24 @@ const MESSAGE = {
 };
 
 /** Every request that reached the network, with the headers it carried. */
-let requests: { url: string; headers: Record<string, string> }[];
+let requests: {
+	method: string;
+	url: string;
+	headers: Record<string, string>;
+	body?: string;
+}[];
+/** The row the stubbed server serves for the by-id read. */
+let served: Record<string, unknown>;
+/** What the stubbed server answers the mark-delivered POST with. */
+let markStatus: number;
 /** Every positional argument list `HttpClient.get` was called with. */
 let getArgs: unknown[][];
 
 beforeEach(() => {
 	requests = [];
 	getArgs = [];
+	served = MESSAGE;
+	markStatus = 200;
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(outputModule, "printTable").mockImplementation(() => {});
@@ -107,12 +117,15 @@ beforeEach(() => {
 
 	vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
 		requests.push({
+			method: String(init.method ?? "GET"),
 			url: String(url),
 			headers: (init.headers ?? {}) as Record<string, string>,
+			body: typeof init.body === "string" ? init.body : undefined,
 		});
+		const isMark = String(url).endsWith("/messages/mark-delivered");
 		return Promise.resolve(
-			new Response(JSON.stringify(MESSAGE), {
-				status: 200,
+			new Response(JSON.stringify(isMark ? { marked: 1 } : served), {
+				status: isMark ? markStatus : 200,
 				headers: { "Content-Type": "application/json" },
 			}),
 		);
@@ -202,13 +215,11 @@ describe("rine read --peek", () => {
 	);
 
 	it.each(Object.keys(SPELLINGS))(
-		"sends no peek header at all for a plain `%s`",
+		"reads as a peek for a plain `%s` too, because it marks the message itself",
 		async (spelling) => {
 			await run(SPELLINGS[spelling] as string[]);
 
-			// Absent, not `"0"`. The server parses both as false, so this asserts
-			// the default is the untouched request today's callers already send.
-			expect(readRequest().headers).not.toHaveProperty(core.PEEK_HEADER);
+			expect(readRequest().headers[core.PEEK_HEADER]).toBe("1");
 		},
 	);
 
@@ -239,5 +250,125 @@ describe("rine read --peek", () => {
 		// peek written into it would ride the resolves this command makes after
 		// the read, and every request of the next command that reuses the client.
 		expect(Object.keys(extraHeaders)).toEqual([core.PEEK_HEADER]);
+	});
+});
+
+/** The mark-delivered POSTs a command made. */
+function marks(): {
+	url: string;
+	headers: Record<string, string>;
+	body?: string;
+}[] {
+	return requests.filter((r) => r.method === "POST");
+}
+
+const OPENED = {
+	plaintext: JSON.stringify({ text: "hi" }),
+	senderKid: "kid-1",
+	verified: true,
+	verificationStatus: "verified",
+};
+
+describe("rine read — the message is marked delivered only once it settles", () => {
+	it.each(Object.keys(SPELLINGS))(
+		"marks a message that opened, once, for the acting agent (`%s`)",
+		async (spelling) => {
+			vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+			vi.spyOn(core, "decryptMessage").mockResolvedValue(OPENED as never);
+
+			await run(SPELLINGS[spelling] as string[]);
+
+			expect(marks()).toHaveLength(1);
+			expect(marks()[0]?.url).toBe(
+				`${API_URL}/agents/${AGENT_ID}/messages/mark-delivered`,
+			);
+			expect(marks()[0]?.headers[core.ACTING_AGENT_HEADER]).toBe(AGENT_ID);
+			expect(JSON.parse(marks()[0]?.body ?? "null")).toEqual({
+				message_ids: [MESSAGE_ID],
+			});
+		},
+	);
+
+	it("marks nothing for a message that opened under --peek", async () => {
+		vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+		vi.spyOn(core, "decryptMessage").mockResolvedValue(OPENED as never);
+
+		await run(SPELLINGS["rine read"] as string[], ["--peek"]);
+
+		expect(marks()).toHaveLength(0);
+	});
+
+	it("marks nothing for a message this agent holds no keys for", async () => {
+		await run(SPELLINGS["rine read"] as string[]);
+
+		expect(marks()).toHaveLength(0);
+	});
+
+	it("marks nothing for a group message whose sender key never arrived", async () => {
+		served = {
+			...MESSAGE,
+			group_id: "33333333-3333-4333-8333-333333333333",
+			encryption_version: "sender-key-v1",
+		};
+		vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+		const recovery = vi
+			.spyOn(core, "decryptGroupMessageWithRecovery")
+			.mockRejectedValue(new core.SenderKeyUnavailableError("sk-77", "g1"));
+
+		await run(SPELLINGS["rine read"] as string[]);
+
+		expect(recovery).toHaveBeenCalledTimes(1);
+		expect(marks()).toHaveLength(0);
+	});
+
+	it("marks a forged group message, which the group decrypt throws rather than returns", async () => {
+		served = {
+			...MESSAGE,
+			group_id: "33333333-3333-4333-8333-333333333333",
+			encryption_version: "sender-key-v1",
+		};
+		vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+		vi.spyOn(core, "decryptGroupMessageWithRecovery").mockRejectedValue(
+			new core.GroupAuthenticityError("invalid"),
+		);
+
+		await run(SPELLINGS["rine read"] as string[]);
+
+		expect(marks()).toHaveLength(1);
+		expect(JSON.parse(marks()[0]?.body ?? "null")).toEqual({
+			message_ids: [MESSAGE_ID],
+		});
+	});
+
+	it("marks a message refused for its author, and one that was never ciphertext", async () => {
+		vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+		vi.spyOn(core, "decryptMessage").mockResolvedValue({
+			...OPENED,
+			plaintext: undefined,
+			verified: false,
+			verificationStatus: "invalid",
+		} as never);
+		await run(SPELLINGS["rine read"] as string[]);
+		expect(marks()).toHaveLength(1);
+
+		served = { ...MESSAGE, encryption_version: "none" };
+		await run(SPELLINGS["rine read"] as string[]);
+		expect(marks()).toHaveLength(2);
+	});
+
+	it("still shows the message, and warns on stderr, when the mark fails", async () => {
+		markStatus = 500;
+		vi.spyOn(core, "agentKeysExist").mockReturnValue(true);
+		vi.spyOn(core, "decryptMessage").mockResolvedValue(OPENED as never);
+
+		await run(SPELLINGS["rine read"] as string[]);
+
+		expect(outputModule.printTable).toHaveBeenCalledTimes(1);
+		const said = vi
+			.mocked(outputModule.printError)
+			.mock.calls.map((c) => String(c[0]))
+			.join("\n");
+		expect(said).toContain("could not mark");
+		expect(said).toContain("stays new");
 	});
 });

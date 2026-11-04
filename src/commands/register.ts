@@ -12,11 +12,11 @@ export function registerRegister(program: Command): void {
 	program
 		.command("register")
 		.description(
-			"Register a new organization (two-step PoW flow). Writes the org root key and recovery phrase to the owner dir",
+			"Register a new organisation (two-step PoW flow). Writes the org root key and recovery phrase to the owner directory",
 		)
 		.requiredOption("--email <email>", "Email address")
-		.requiredOption("--name <name>", "Organization name")
-		.requiredOption("--slug <slug>", "Organization slug")
+		.requiredOption("--name <name>", "Organisation name")
+		.requiredOption("--slug <slug>", "Organisation slug")
 		.action(
 			withErrorHandler(
 				program,

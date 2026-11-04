@@ -17,7 +17,7 @@ import { printError, printJson } from "../output.js";
 import { promptConfirm } from "../prompt.js";
 
 const NO_ROOT =
-	"Creating a branch needs this org's root key (root.key in the owner dir). A delegate cannot create branches.";
+	"Creating a branch needs this org's root key (root.key in the owner directory). A delegate cannot create branches.";
 
 interface CreateOpts {
 	to: string;
@@ -39,7 +39,7 @@ export function registerOrgBranch(org: Command, program: Command): void {
 	branch
 		.command("create <name>")
 		.description("Create a branch and seal its bundle to a recipient key")
-		.requiredOption("--to <recipient-key>", "The fleet's recipient key")
+		.requiredOption("--to <recipient-key>", "The partner's recipient key")
 		.option("--out <file>", "Where to write the sealed bundle")
 		.option("--words-confirmed", "Skip the interactive word comparison")
 		.action(

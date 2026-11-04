@@ -19,8 +19,8 @@ interface CleartextRow {
  * A cleartext body is readable without any key, so it is shown like any other
  * unverified line — the `?` mark, the same one every unverified preview uses —
  * led by the notice that says the body was never end-to-end encrypted. A
- * payload that does not decode throws, and the caller's own catch renders the
- * generic line.
+ * payload that does not decode throws, and the caller treats the row as one
+ * with no preview.
  */
 export function a2aCleartextPreview(data: CleartextRow): string | null {
 	const row = {

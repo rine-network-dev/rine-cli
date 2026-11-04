@@ -123,7 +123,7 @@ export function registerGroupCrud(program: Command, group: Command): void {
 		.option("--description <desc>", DESCRIPTION_HELP)
 		.option(
 			"--enrollment <policy>",
-			"Enrollment policy (open|closed|majority|unanimity)",
+			"Enrolment policy (open|closed|majority|unanimity)",
 		)
 		.option(
 			"--visibility <vis>",

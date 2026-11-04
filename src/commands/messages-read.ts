@@ -20,7 +20,7 @@ import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printError, printJson, printTable, printText } from "../output.js";
-import { type DecryptRefusal, openMessage } from "./messages-read-decrypt.js";
+import { markIfSettled, openMessage } from "./messages-read-decrypt.js";
 import { jsonRow, msgFrom, msgGroup, msgTo, verifiedMark } from "./messages-rows.js";
 
 /**
@@ -36,13 +36,12 @@ interface ReadOpts {
 	/**
 	 * Read the message WITHOUT consuming it.
 	 *
-	 * A read marks the message delivered whether or not it decrypts, and there
-	 * is no route that un-marks one — so a message this agent's keys cannot open
-	 * disappears from `--new`, `/poll` and the stream's catch-up after a single
-	 * look, while staying fetchable only by an id the caller has to have kept.
-	 * `--peek` is how a caller declines that: `X-Rine-Peek` suppresses the
-	 * delivery mark and nothing else — same authorisation, same body, same
-	 * refusals — so the row stays `new` and a later poll is still offered it.
+	 * Every read fetches with `X-Rine-Peek` and marks the message delivered
+	 * itself, only once it has opened (or carries no ciphertext, or its author
+	 * was refused). One this agent's keys cannot open yet stays `new` without
+	 * any flag, so a key fix or resync can still recover it. `--peek` declines
+	 * the mark even for a message that opens: it stays `new` and a later poll is
+	 * still offered it.
 	 */
 	peek?: boolean;
 }
@@ -79,16 +78,15 @@ export function addReadCommand(parent: Command, program: Command): void {
 					// which authorization path runs.
 					const agentId = await actingAgent();
 
-					// 🔴 A FRESH object, never `ctx.extraHeaders`. That one is the
-					// client's default headers, held by reference and spread into
-					// every later request of this invocation — a peek written
-					// there would silently ride the resolves this command makes
-					// after the read. Absent, not `"0"`: the server parses both as
-					// false, and absent is the untouched-behaviour case.
+					// 🔴 Always a peek, in a FRESH object, never `ctx.extraHeaders`: that
+					// one is the client's default headers, spread into every later
+					// request of this invocation. The server would mark the row at
+					// fetch, before the keys have touched it; `markIfSettled` marks
+					// it once it has settled (`--peek` suppresses that too).
 					const data = (await client.get(
 						`/messages/${messageId}`,
 						undefined,
-						withPeekHeader(undefined, opts.peek),
+						withPeekHeader(undefined, true),
 					)) as MessageRead;
 
 					// The envelope's claim of authorship is checked against the sender the
@@ -100,18 +98,20 @@ export function addReadCommand(parent: Command, program: Command): void {
 						isDecryptableVersion(data.encryption_version) &&
 						agentKeysExist(configDir, agentId);
 
-					let refusal: DecryptRefusal | null = null;
-					if (canDecrypt) {
-						const opened = await openMessage({
-							client,
-							configDir,
-							agentId,
-							data,
-							// Narrowed by `canDecrypt` above.
-							fromAgentId: fromAgentId as string,
-						});
+					const opened = canDecrypt
+						? await openMessage({
+								client,
+								configDir,
+								agentId,
+								data,
+								// Narrowed by `canDecrypt` above.
+								fromAgentId: fromAgentId as string,
+							})
+						: null;
+					await markIfSettled(client, agentId, data, opened, opts.peek);
+					const refusal = opened?.refusal ?? null;
+					if (opened) {
 						const decResult = opened.result;
-						refusal = opened.refusal;
 						// Prose to stderr for a human, ahead of whatever renders below. A
 						// `--json` caller is told the same thing as a field instead, on the
 						// envelope at the end — never both, and never neither.

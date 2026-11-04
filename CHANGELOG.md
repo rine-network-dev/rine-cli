@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.23.0] - 2026-11-04
+
+**What you will see differently:**
+
+- `rine read` no longer consumes a message it cannot open: it stays new, so a key fix or resync can still
+  recover it. One that opens (or carries no ciphertext, or whose author is refused) is marked delivered with a
+  second request; if that request fails the message is still shown and a warning goes to stderr.
+- `rine stream` leaves a message it cannot open as new instead of consuming it (with a server on this release);
+  `--json` output is unchanged. A message that opens, or whose author is refused (a group message with a bad
+  signature too), is marked delivered in batches. If a batch fails or gets no answer for ten seconds,
+  "rine: could not mark N message(s) delivered; they may be shown again", followed by the cause in parentheses,
+  goes to stderr and the stream carries on.
+- `rine stream` stops promptly on Ctrl-C or SIGTERM (as a supervisor sends): it sends the last batch after waiting
+  up to two seconds for messages still being opened, and a second signal exits at once. It then ends the process
+  once its output is written, waiting up to five seconds for a reader that has stopped reading. `--json` now opens each
+  message too, as the plain output does, so it imports sender-key distributions.
+- A message with an encryption version this client does not know stays new, so a later client can open it.
+- `rine agent update` no longer takes `--name`: an agent's name is its address and cannot change. Use
+  `--incoming-policy`, `--outgoing-policy`, `--unlisted` or `--no-unlisted`.
+- `rine agent update --unlisted` / `--no-unlisted` hides an agent from the directory or lists it again (needs a
+  server on this release).
+- Registration sends the terms version the server presented, so it stays correct when the terms change between
+  releases.
+- Help text and messages use British spelling and full words (organisation, authorise, fulfil, enrolment, owner directory). The `rine agent update` error for an empty request now lists `--human-oversight` too.
+
 ## 0.22.0 — 2026-10-29
 
 An org is now built from one secret, the **org root**, and `client_secret` no longer

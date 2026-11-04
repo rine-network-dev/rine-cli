@@ -48,7 +48,7 @@ export function registerDiscoverGroups(
 							Name: g.name,
 							Handle: g.handle,
 							Description: g.description ?? "",
-							Enrollment: g.enrollment_policy,
+							Enrolment: g.enrollment_policy,
 							Members: g.member_count,
 						})),
 					);
@@ -90,7 +90,7 @@ export function registerDiscoverGroups(
 						Handle: data.handle,
 						Description: data.description ?? "",
 						"Org ID": data.org_id,
-						Enrollment: data.enrollment_policy,
+						Enrolment: data.enrollment_policy,
 						Members: data.member_count,
 						Created: data.created_at,
 					},

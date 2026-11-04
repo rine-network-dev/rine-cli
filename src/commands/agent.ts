@@ -145,8 +145,9 @@ export function registerAgent(program: Command): void {
 		.command("update")
 		.description("Update agent details")
 		.argument("<agent-id>", "Agent ID")
-		.option("--name <name>", "Agent name")
 		.option("--[no-]human-oversight", "Require human oversight")
+		.option("--unlisted", "Hide the agent from the directory")
+		.option("--no-unlisted", "List the agent in the directory again")
 		.option(
 			"--incoming-policy <policy>",
 			"Incoming message policy (accept_all|groups_only)",
@@ -162,30 +163,27 @@ export function registerAgent(program: Command): void {
 					{ client, gOpts },
 					agentId: string,
 					opts: {
-						name?: string;
 						humanOversight?: boolean;
+						unlisted?: boolean;
 						incomingPolicy?: string;
 						outgoingPolicy?: string;
 					},
 				) => {
 					const body: Record<string, unknown> = {};
-					if (opts.name) body.name = opts.name;
 					if (opts.humanOversight !== undefined) {
 						body.human_oversight = opts.humanOversight;
 					}
 					if (opts.incomingPolicy) body.incoming_policy = opts.incomingPolicy;
 					if (opts.outgoingPolicy) body.outgoing_policy = opts.outgoingPolicy;
+					if (opts.unlisted !== undefined) body.unlisted = opts.unlisted;
 					if (Object.keys(body).length === 0) {
 						printError(
-							"At least one of --name, --human-oversight, --incoming-policy, --outgoing-policy is required",
+							"At least one of --incoming-policy, --outgoing-policy, --human-oversight, --no-human-oversight, --unlisted or --no-unlisted is required",
 						);
 						process.exitCode = 2;
 						return;
 					}
-					const data = (await client.patch(
-						`/agents/${agentId}`,
-						body,
-					)) as AgentRead;
+					const data = (await client.patch(`/agents/${agentId}`, body)) as AgentRead;
 					if (gOpts.json) {
 						printJson(data);
 					} else {

@@ -15,22 +15,26 @@
 
 import {
 	type HttpClient,
+	type MessageDecryptResult,
 	type MessageRead,
+	type VerificationStatus,
 	MLS_ERR_GROUP_INACTIVE,
 	SENDER_KEY_UNAVAILABLE_CODE,
+	ackAfterRead,
 	asSenderKeyUnavailable,
 	cliSyncRemedy,
 	decryptGroupMessageWithRecovery,
 	decryptMessage,
 	formatError,
+	groupAuthenticityStatus,
 	isGroupEncryptionVersion,
 	isRecoverableMlsRead,
+	isSettledRow,
 	mlsReadRefusal,
 	mlsErrorCode,
 } from "@rine-network/core";
+import { printError } from "../output.js";
 import { mlsFailureText } from "./group-mls-failure.js";
-
-type DecryptResult = Awaited<ReturnType<typeof decryptMessage>>;
 
 /**
  * Why a message could not be opened.
@@ -48,8 +52,40 @@ export interface DecryptRefusal {
 }
 
 export interface OpenedMessage {
-	readonly result?: DecryptResult;
+	readonly result?: MessageDecryptResult;
 	readonly refusal: DecryptRefusal | null;
+	/** The verdict of a forged group row: the group decrypt throws it, so no `result` carries it. */
+	readonly forgedStatus?: VerificationStatus;
+}
+
+/**
+ * Mark a fetched message delivered once reading it is settled: it opened, was
+ * never ciphertext, or its author was refused. `opened` is null when no decrypt
+ * was attempted (no keys, no authenticated sender). A failed mark is a stderr
+ * warning and the read goes on; the message simply stays new.
+ */
+export async function markIfSettled(
+	client: HttpClient,
+	agentId: string,
+	data: MessageRead,
+	opened: OpenedMessage | null,
+	peek: boolean | undefined,
+): Promise<void> {
+	const result = opened?.result;
+	const verification_status =
+		result?.verificationStatus ?? opened?.forgedStatus;
+	const failure = await ackAfterRead(client, agentId, [data.id], {
+		settled: isSettledRow(
+			{ ...data, verification_status },
+			result?.plaintext !== undefined,
+		),
+		peek,
+	});
+	if (failure) {
+		printError(
+			`Warning: could not mark ${data.id} delivered (${failure.message}); it stays new`,
+		);
+	}
 }
 
 /** Decrypt one message, dispatching on its encryption version. Never throws. */
@@ -105,7 +141,8 @@ export async function openMessage(opts: {
 		// Everything the recovery can end in arrives here, the transport failures
 		// of the recovery's own fetch included — which is what makes this
 		// function's "never throws" true rather than merely stated.
-		return { refusal: refusalFor(err, groupId) };
+		const forgedStatus = groupAuthenticityStatus(err) ?? undefined;
+		return { refusal: refusalFor(err, groupId), forgedStatus };
 	}
 }
 

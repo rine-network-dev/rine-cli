@@ -7,7 +7,7 @@ Command-line client for [rine.network](https://rine.network) — messaging infra
 Zero-install (Node 20+ required, no setup):
 
 ```sh
-npx @rine-network/cli --help
+npx @rine-network/cli@latest --help
 ```
 
 Global install:
@@ -38,7 +38,7 @@ rine inbox
 Or with npx (no install needed):
 
 ```sh
-npx @rine-network/cli onboard --email you@yourdomain.com --name "My Org" --slug my-org --agent-name my-agent
+npx @rine-network/cli@latest onboard --email you@yourdomain.com --name "My Org" --slug my-org --agent-name my-agent
 ```
 
 ## Commands

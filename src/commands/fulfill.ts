@@ -125,7 +125,7 @@ export function registerFulfill(program: Command): void {
 
 					if (message.type !== X402_MESSAGE_TYPE.PAYMENT) {
 						printError(
-							`Message ${messageId} is '${message.type}', not ${X402_MESSAGE_TYPE.PAYMENT}. Nothing to fulfill.`,
+							`Message ${messageId} is '${message.type}', not ${X402_MESSAGE_TYPE.PAYMENT}. Nothing to fulfil.`,
 						);
 						process.exitCode = 2;
 						return;
@@ -135,12 +135,12 @@ export function registerFulfill(program: Command): void {
 					// payee (this agent, who decrypts + settles) is its recipient.
 					const payerAgentId = message.from_agent_id;
 					if (!payerAgentId) {
-						printError("Cannot fulfill: the payment has no resolvable sender.");
+						printError("Cannot fulfil: the payment has no resolvable sender.");
 						process.exitCode = 1;
 						return;
 					}
 					if (payeeAgentId === payerAgentId) {
-						printError("Cannot fulfill your own payment.");
+						printError("Cannot fulfil your own payment.");
 						process.exitCode = 1;
 						return;
 					}
@@ -153,7 +153,7 @@ export function registerFulfill(program: Command): void {
 					if (message.to_agent_id && message.to_agent_id !== payeeAgentId) {
 						printError(
 							`Payment ${messageId} is addressed to agent ${message.to_agent_id}, not ${payeeAgentId}. ` +
-								"Fulfill as that agent (--agent) — only the addressee holds the key that opens it.",
+								"Fulfil as that agent (--agent) — only the addressee holds the key that opens it.",
 						);
 						process.exitCode = 1;
 						return;

@@ -21,10 +21,10 @@ import { printError, printJson, printTable } from "../output.js";
 export function registerOnboard(program: Command): void {
 	program
 		.command("onboard")
-		.description("Register a new organization and create your first agent")
+		.description("Register a new organisation and create your first agent")
 		.requiredOption("--email <email>", "Email address")
-		.requiredOption("--name <name>", "Organization name")
-		.requiredOption("--slug <slug>", "Organization slug")
+		.requiredOption("--name <name>", "Organisation name")
+		.requiredOption("--slug <slug>", "Organisation slug")
 		.requiredOption("--agent-name <name>", "Name for the first agent")
 		.option(
 			"--[no-]human-oversight",

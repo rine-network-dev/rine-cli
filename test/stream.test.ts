@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("eventsource-client", () => ({
 	createEventSource: vi.fn(),
@@ -22,11 +22,18 @@ vi.mock("@rine-network/core", async (importOriginal) => ({
 	// the bare decrypt left the real recovery running underneath — a mock the
 	// code no longer calls.
 	decryptGroupMessageWithRecovery: vi.fn(),
+	// Passes through to the real decoder; one test makes it throw.
+	a2aCleartextPlaintext: vi.fn(
+		((await importOriginal()) as typeof import("@rine-network/core"))
+			.a2aCleartextPlaintext,
+	),
 }));
+
+const { markDelivered } = vi.hoisted(() => ({ markDelivered: vi.fn() }));
 
 vi.mock("../src/action.js", () => ({
 	createClient: vi.fn(async () => ({
-		client: { get: vi.fn(), post: vi.fn() },
+		client: { get: vi.fn(), post: vi.fn(), markDelivered },
 		profileName: "default",
 		dirs: { configDir: "/fake/config", ownerDir: "/fake/owner" },
 		auth: undefined,
@@ -45,17 +52,23 @@ vi.mock("../src/commands/stream-cursor.js", () => ({
 
 const CREATED_AT = "2026-10-01T12:00:00Z";
 
+import { readFileSync } from "node:fs";
 import { createEventSource } from "eventsource-client";
 import { Command } from "commander";
 import { registerStream } from "../src/commands/stream.js";
 import {
+	ACTING_AGENT_HEADER,
+	a2aCleartextPlaintext,
+	PEEK_HEADER,
 	SENDER_KEY_UNAVAILABLE_PREVIEW,
 	UNKNOWN_SENDER_KEY_CLAUSE,
 	agentKeysExist,
+	GroupAuthenticityError,
 	decryptGroupMessageWithRecovery,
 	decryptMessage,
 } from "@rine-network/core";
 import { loadStreamCursor, saveStreamCursor } from "../src/commands/stream-cursor.js";
+import { exitWhenFlushed } from "../src/commands/stream-stop.js";
 import { printError } from "../src/output.js";
 
 const mockCreateEventSource = vi.mocked(createEventSource);
@@ -82,30 +95,37 @@ function captureStderr(): { lines: string[]; restore: () => void } {
 	const lines: string[] = [];
 	const mock = vi.spyOn(process.stderr, "write").mockImplementation((...args: unknown[]) => {
 		lines.push(String(args[0]));
+		const done = args.at(-1);
+		if (typeof done === "function") done();
 		return true;
 	});
 	return { lines, restore: () => mock.mockRestore() };
 }
 
 type SigintHandler = (...args: unknown[]) => void;
+type StopSignal = "SIGINT" | "SIGTERM";
 
 describe("rine stream", () => {
-	let sigintListeners: SigintHandler[];
+	let signalListeners: Record<StopSignal, SigintHandler[]>;
+
+	function fireSignal(signal: StopSignal): void {
+		for (const l of [...signalListeners[signal]]) l();
+	}
 
 	function fireSigint(): void {
-		for (const l of [...sigintListeners]) l();
+		fireSignal("SIGINT");
 	}
 
 	function installSigintCapture(): void {
-		sigintListeners = [];
-		vi.spyOn(process, "on").mockImplementation(((event: string, listener: SigintHandler) => {
-			if (event === "SIGINT") sigintListeners.push(listener);
+		signalListeners = { SIGINT: [], SIGTERM: [] };
+		const capture = (event: string, listener: SigintHandler) => {
+			if (event === "SIGINT" || event === "SIGTERM") {
+				signalListeners[event].push(listener);
+			}
 			return process;
-		}) as typeof process.on);
-		vi.spyOn(process, "once").mockImplementation(((event: string, listener: SigintHandler) => {
-			if (event === "SIGINT") sigintListeners.push(listener);
-			return process;
-		}) as typeof process.once);
+		};
+		vi.spyOn(process, "on").mockImplementation(capture as typeof process.on);
+		vi.spyOn(process, "once").mockImplementation(capture as typeof process.once);
 	}
 
 	function makeMockEs(onCreated?: (opts: any, es: any) => void): any {
@@ -116,8 +136,12 @@ describe("rine stream", () => {
 		};
 	}
 
+	let exit: MockInstance<typeof process.exit>;
+
 	beforeEach(() => {
 		installSigintCapture();
+		// A second stop signal exits at once; the tests that signal twice must not end the runner.
+		exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		process.exitCode = undefined;
 		mockLoadCursor.mockReset();
 		mockLoadCursor.mockReturnValue(undefined);
@@ -362,7 +386,7 @@ describe("rine stream", () => {
 			expect(connectingEvents[2].data.attempt).toBe(3);
 		});
 
-		it("holds one SIGINT listener however many times it reconnects", async () => {
+		it("holds one listener per stop signal however many times it reconnects", async () => {
 			const out = captureStdout();
 
 			for (let i = 0; i < 3; i++) {
@@ -375,7 +399,8 @@ describe("rine stream", () => {
 			await program.parseAsync(["node", "rine", "stream", "--json"]);
 			out.restore();
 
-			expect(sigintListeners).toHaveLength(1);
+			expect(signalListeners.SIGINT).toHaveLength(1);
+			expect(signalListeners.SIGTERM).toHaveLength(1);
 			const stopped = out.lines
 				.filter((l) => l.includes('"lifecycle"'))
 				.map((l) => JSON.parse(l))
@@ -1041,6 +1066,406 @@ describe("rine stream", () => {
 			expect(line).toContain("[encrypted]");
 			expect(mockDecryptDm).not.toHaveBeenCalled();
 			expect(mockDecryptGroup).not.toHaveBeenCalled();
+		});
+	});
+	describe("delivery acknowledgement", () => {
+		const mockAgentKeysExist = vi.mocked(agentKeysExist);
+		const mockDecryptDm = vi.mocked(decryptMessage);
+		const mockDecryptGroup = vi.mocked(decryptGroupMessageWithRecovery);
+		const PEER_ID = "22222222-2222-2222-2222-222222222222";
+
+		const groupEvent = (id: string) => ({
+			...dmEvent(id),
+			type: "rine.v1.group_message",
+			group_id: "group-1",
+			encryption_version: "mls-v1",
+		});
+
+		const dmEvent = (id: string) => ({
+			id,
+			from_agent_id: PEER_ID,
+			type: "rine.v1.dm",
+			encryption_version: "hpke-hybrid-v2",
+			encrypted_payload: "AwQF",
+			created_at: CREATED_AT,
+		});
+
+		const opened = (verificationStatus: string, plaintext = "hello") =>
+			({
+				plaintext,
+				senderKid: "agent-2:sig",
+				verified: verificationStatus === "verified",
+				verificationStatus,
+			}) as unknown as Awaited<ReturnType<typeof decryptMessage>>;
+
+		beforeEach(() => {
+			markDelivered.mockReset();
+			markDelivered.mockResolvedValue(undefined);
+			mockAgentKeysExist.mockReset();
+			mockAgentKeysExist.mockReturnValue(true);
+			mockDecryptDm.mockReset();
+			mockDecryptGroup.mockReset();
+		});
+
+		afterEach(() => {
+			mockAgentKeysExist.mockReset();
+			mockAgentKeysExist.mockReturnValue(false);
+			mockDecryptDm.mockReset();
+			mockDecryptGroup.mockReset();
+		});
+
+		const drain = async () => {
+			for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+		};
+
+		/** Streams the frames, optionally checks mid-stream, then stops with a signal. */
+		async function streamFrames(
+			frames: Array<{ event: string; data: string; id?: string | null }>,
+			args: string[] = [],
+			midStream?: () => void,
+			signal: StopSignal = "SIGINT",
+		): Promise<{ stdout: string[]; stderr: string[]; headers: Record<string, string>[] }> {
+			const out = captureStdout();
+			const err = captureStderr();
+			const headers: Record<string, string>[] = [];
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				headers.push(opts.headers);
+				Promise.resolve().then(async () => {
+					for (const f of frames) {
+						opts.onMessage({ id: null, ...f });
+						await drain();
+					}
+					midStream?.();
+					fireSignal(signal);
+				});
+				return { close: vi.fn() };
+			}) as any);
+			await makeProgram().parseAsync(["node", "rine", ...args, "stream"]);
+			await drain();
+			out.restore();
+			err.restore();
+			return { stdout: out.lines, stderr: err.lines, headers };
+		}
+
+		const message = (payload: Record<string, unknown>) => ({
+			event: "message",
+			data: JSON.stringify(payload),
+		});
+
+		it.each([[[]], [["--json"]]])("connects with the peek header (%j)", async (args) => {
+			const { headers } = await streamFrames([], args);
+			expect(headers[0]?.[PEEK_HEADER]).toBe("1");
+		});
+
+		it.each([["human", []], ["json", ["--json"]]])(
+			"acks an opened frame and not an undecryptable one (%s)",
+			async (_mode, args) => {
+				mockDecryptDm.mockResolvedValueOnce(opened("verified"));
+				mockDecryptDm.mockRejectedValueOnce(new Error("no key"));
+				await streamFrames(
+					[message(dmEvent("opened")), message(dmEvent("locked"))],
+					args,
+				);
+				expect(markDelivered).toHaveBeenCalledTimes(1);
+				expect(markDelivered).toHaveBeenCalledWith("agent-1", ["opened"], {
+					[ACTING_AGENT_HEADER]: "agent-1",
+				});
+			},
+		);
+
+		it("acks a frame whose sender signature failed", async () => {
+			mockDecryptDm.mockResolvedValueOnce(opened("sender-mismatch", ""));
+			await streamFrames([message(dmEvent("forged"))]);
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["forged"], expect.anything());
+		});
+
+		it.each([
+			["invalid", "[✗ invalid signature]"],
+			["sender-mismatch", "[✗ sender mismatch]"],
+		] as const)(
+			"acks a group frame whose author was refused (%s) and prints the verdict",
+			async (status, label) => {
+				mockDecryptGroup.mockRejectedValueOnce(new GroupAuthenticityError(status));
+				const { stdout } = await streamFrames([message(groupEvent("forged"))]);
+
+				expect(markDelivered).toHaveBeenCalledWith("agent-1", ["forged"], expect.anything());
+				expect(stdout.join("\n")).toContain(label);
+			},
+		);
+
+		it("does not ack a group frame that failed to decrypt for any other reason", async () => {
+			mockDecryptGroup.mockRejectedValueOnce(new Error("No MLS state for group"));
+			await streamFrames([message(groupEvent("locked"))]);
+
+			expect(markDelivered).not.toHaveBeenCalled();
+		});
+
+		it("acks a cleartext frame without any local keys", async () => {
+			mockAgentKeysExist.mockReturnValue(false);
+			await streamFrames([
+				message({ ...dmEvent("plain"), encryption_version: "none" }),
+			]);
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["plain"], expect.anything());
+		});
+
+		it("does not ack a sealed frame when there are no local keys", async () => {
+			mockAgentKeysExist.mockReturnValue(false);
+			await streamFrames([message(dmEvent("sealed"))]);
+			expect(markDelivered).not.toHaveBeenCalled();
+		});
+
+		it("does not ack a frame that is not an envelope", async () => {
+			await streamFrames([{ event: "message", data: "not json" }]);
+			expect(markDelivered).not.toHaveBeenCalled();
+		});
+
+		it("flushes the batch on a heartbeat, before the stream ends", async () => {
+			mockDecryptDm.mockResolvedValue(opened("verified"));
+			let ackedBeforeEnd = 0;
+			await streamFrames(
+				[message(dmEvent("a")), { event: "heartbeat", data: "{}" }],
+				[],
+				() => {
+					ackedBeforeEnd = markDelivered.mock.calls.length;
+				},
+			);
+			expect(ackedBeforeEnd).toBe(1);
+		});
+
+		it("keeps --json stdout byte for byte what the previous release printed", async () => {
+			// Recorded by running this scenario against `git archive master`.
+			const recorded: string[] = JSON.parse(
+				readFileSync(
+					new URL("./fixtures/stream-json-stdout.json", import.meta.url),
+					"utf8",
+				),
+			);
+			mockDecryptDm.mockResolvedValueOnce(opened("verified"));
+			mockDecryptDm.mockRejectedValueOnce(new Error("no key"));
+			const cleartext = {
+				from_agent_id: PEER_ID,
+				type: "rine.v1.a2a_message",
+				encryption_version: "none",
+				encrypted_payload: "W3sidGV4dCI6ICJwbGFpbiJ9XQ",
+				created_at: CREATED_AT,
+			};
+
+			const { stdout } = await streamFrames(
+				[
+					{ ...message(dmEvent("raw")), id: "evt-1" },
+					{ event: "heartbeat", data: "{}", id: null },
+					{ ...message(dmEvent("locked")), id: "evt-2" },
+					{ ...message(cleartext), id: "evt-3" },
+					{ event: "message", data: "not json", id: "evt-4" },
+				],
+				["--json"],
+			);
+
+			expect(stdout).toEqual(recorded);
+		});
+
+		it("acks an A2A cleartext row whose body cannot be decoded, without a preview", async () => {
+			mockAgentKeysExist.mockReturnValue(false);
+			vi.mocked(a2aCleartextPlaintext).mockImplementationOnce(() => {
+				throw new Error("not text");
+			});
+			const { stdout } = await streamFrames([
+				message({
+					...dmEvent("odd"),
+					type: "rine.v1.a2a_message",
+					encryption_version: "none",
+					encrypted_payload: "W3sidGV4dCI6ICJwbGFpbiJ9XQ",
+				}),
+			]);
+
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["odd"], expect.anything());
+			expect(stdout.filter((l) => l.includes("[message]"))).toEqual([]);
+		});
+
+		it("flushes the batch on SIGTERM as it does on SIGINT", async () => {
+			mockDecryptDm.mockResolvedValue(opened("verified"));
+			await streamFrames([message(dmEvent("a"))], [], undefined, "SIGTERM");
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["a"], expect.anything());
+		});
+
+		it("waits for a row still being opened before it sends the last batch", async () => {
+			let release: () => void = () => {};
+			mockDecryptDm.mockReturnValueOnce(
+				new Promise((resolve) => {
+					release = () => resolve(opened("verified"));
+				}),
+			);
+			await streamFrames([message(dmEvent("late"))], [], () => {
+				setTimeout(release, 20);
+			});
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["late"], expect.anything());
+		});
+
+		describe("stopping promptly", () => {
+			const stuckDecrypt = () =>
+				mockDecryptDm.mockReturnValueOnce(new Promise(() => {}));
+
+			beforeEach(() => {
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			});
+
+			afterEach(() => {
+				vi.useRealTimers();
+				vi.restoreAllMocks();
+			});
+
+			/** Runs the command until `settled` flips, advancing fake time by `ms` once the signal is out. */
+			const runUntilStopped = async (
+				start: () => Promise<unknown>,
+				signal: () => void,
+			) => {
+				let settled = false;
+				const run = start().then(() => {
+					settled = true;
+				});
+				await drain();
+				signal();
+				await drain();
+				return { run, isSettled: () => settled };
+			};
+
+			it("cuts the reconnect backoff short when a signal arrives", async () => {
+				mockCreateEventSource.mockImplementationOnce((() => {
+					throw new Error("connection refused");
+				}) as any);
+				const err = captureStderr();
+				const { run, isSettled } = await runUntilStopped(
+					() => makeProgram().parseAsync(["node", "rine", "stream"]),
+					() => fireSignal("SIGTERM"),
+				);
+				err.restore();
+
+				// No fake time has passed: only the signal can have ended the backoff.
+				expect(isSettled()).toBe(true);
+				await run;
+			});
+
+			it("cuts the heartbeat-timeout backoff short when a signal arrives", async () => {
+				mockCreateEventSource.mockImplementationOnce((() => ({ close: vi.fn() })) as any);
+				const err = captureStderr();
+				let settled = false;
+				const run = makeProgram()
+					.parseAsync(["node", "rine", "stream", "--heartbeat-timeout", "10"])
+					.then(() => {
+						settled = true;
+					});
+				await drain();
+				await vi.advanceTimersByTimeAsync(10_000);
+				await drain();
+				expect(settled).toBe(false);
+				fireSignal("SIGTERM");
+				await drain();
+				err.restore();
+
+				// The backoff is 500 to 1500 ms and none of it has passed.
+				expect(settled).toBe(true);
+				await run;
+			});
+
+			it("stops waiting for a row still being opened after two seconds", async () => {
+				stuckDecrypt();
+				mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+					opts.onMessage({ event: "message", data: JSON.stringify(dmEvent("stuck")), id: null });
+					return { close: vi.fn() };
+				}) as any);
+				const { run, isSettled } = await runUntilStopped(
+					() => makeProgram().parseAsync(["node", "rine", "stream"]),
+					() => fireSignal("SIGINT"),
+				);
+
+				await vi.advanceTimersByTimeAsync(1900);
+				expect(isSettled()).toBe(false);
+				await vi.advanceTimersByTimeAsync(200);
+				await run;
+				expect(isSettled()).toBe(true);
+			});
+
+			it("exits at once on a second signal", async () => {
+				stuckDecrypt();
+				mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+					opts.onMessage({ event: "message", data: JSON.stringify(dmEvent("stuck")), id: null });
+					return { close: vi.fn() };
+				}) as any);
+				const { run } = await runUntilStopped(
+					() => makeProgram().parseAsync(["node", "rine", "stream"]),
+					() => fireSignal("SIGINT"),
+				);
+				expect(exit).not.toHaveBeenCalled();
+
+				fireSignal("SIGTERM");
+
+				expect(exit).toHaveBeenCalledWith(0);
+				await vi.advanceTimersByTimeAsync(2100);
+				await run;
+			});
+		});
+
+		it("ends the process with its status once the close has run", async () => {
+			mockDecryptDm.mockResolvedValue(opened("verified"));
+			await streamFrames([message(dmEvent("a"))]);
+
+			expect(markDelivered).toHaveBeenCalledWith("agent-1", ["a"], expect.anything());
+			expect(exit).toHaveBeenCalledTimes(1);
+			expect(exit).toHaveBeenCalledWith(0);
+			expect(exit.mock.invocationCallOrder[0]).toBeGreaterThan(
+				markDelivered.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+			);
+		});
+
+		describe("exit after the close", () => {
+			let flush: (() => void) | undefined;
+
+			beforeEach(() => {
+				flush = undefined;
+				captureStderr();
+				// A full pipe: the write is queued and its callback waits for the reader.
+				vi.spyOn(process.stdout, "write").mockImplementation(((...args: unknown[]) => {
+					const done = args.at(-1);
+					if (typeof done === "function") flush = done as () => void;
+					return false;
+				}) as never);
+			});
+
+			it("waits for stdout to flush before ending the process", async () => {
+				const ended = exitWhenFlushed(0);
+				await Promise.resolve();
+
+				expect(exit).not.toHaveBeenCalled();
+				flush?.();
+				await ended;
+				expect(exit).toHaveBeenCalledWith(0);
+			});
+
+			it("ends the process anyway once a stalled reader outlasts the wait", async () => {
+				vi.useFakeTimers();
+				const ended = exitWhenFlushed(1, 50);
+				await vi.advanceTimersByTimeAsync(49);
+				expect(exit).not.toHaveBeenCalled();
+
+				await vi.advanceTimersByTimeAsync(1);
+				await ended;
+				expect(exit).toHaveBeenCalledWith(1);
+				vi.useRealTimers();
+			});
+		});
+
+		it("reports a failed ack once, on stderr, and keeps streaming", async () => {
+			mockDecryptDm.mockResolvedValue(opened("verified"));
+			markDelivered.mockRejectedValue(new Error("503"));
+			const { stderr } = await streamFrames([
+				message(dmEvent("a")),
+				message(dmEvent("b")),
+			]);
+			const warnings = stderr.filter((l) => l.includes("could not mark"));
+			expect(warnings).toEqual([
+				"rine: could not mark 2 message(s) delivered; they may be shown again (503)\n",
+			]);
+			expect(process.exitCode).not.toBe(1);
 		});
 	});
 });

@@ -30,9 +30,9 @@ import { GROUP_REFERENCE_HELP, groupTarget } from "./group-target.js";
 /** An open group has no ratchet tree, so there is no admission to resume in it. */
 const NOT_AN_MLS_GROUP =
 	"This group runs on Sender Keys, not MLS, so it has no ratchet tree to seat" +
-	" anyone in. Open-enrollment groups are sender-key groups by design: MLS would" +
+	" anyone in. Open-enrolment groups are sender-key groups by design: MLS would" +
 	" hand an unattested joiner a cryptographic seat, so the server keeps open" +
-	" enrollment off the MLS path. There is nothing to resume here.";
+	" enrolment off the MLS path. There is nothing to resume here.";
 
 function printAdmission(result: MlsAdmissionResult, json?: boolean): void {
 	if (json) {
