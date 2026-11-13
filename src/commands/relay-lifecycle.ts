@@ -9,3 +9,9 @@ export function emitLifecycle(
 ): void {
 	if (json) console.log(JSON.stringify({ event: "lifecycle", data }));
 }
+
+/** How long a paused relay waits between attempts to re-bind. */
+export const PAUSED_RETRY_MS = 30_000;
+
+/** The sentence logged, and carried in the event, when the agent is held. */
+export const PAUSED_MESSAGE = `tunnel paused: the agent is suspended; retrying every ${PAUSED_RETRY_MS / 1000} s`;

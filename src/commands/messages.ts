@@ -10,6 +10,7 @@ import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printJson, printTable } from "../output.js";
 import { GROUP_REFERENCE_HELP } from "./group-target.js";
+import { HIDE_CONTROL_HELP, withoutControlFrames } from "./hide-control.js";
 import { addInboxCommand } from "./messages-inbox.js";
 import { addReadCommand } from "./messages-read.js";
 import { addReplyCommand } from "./messages-reply.js";
@@ -33,13 +34,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 		.option("--group <ref>", GROUP_REFERENCE_HELP)
 		.addOption(actorOption())
 		.option("--limit <n>", "Max turns to return (most-recent window)")
+		.option("--hide-control", HIDE_CONTROL_HELP)
 		.action(
 			withClient(
 				program,
 				async (
 					{ client, gOpts, configDir, actingAgent },
 					conversationId: string | undefined,
-					opts: { group?: string; agent?: string; limit?: string },
+					opts: { group?: string; agent?: string; limit?: string; hideControl?: boolean },
 				) => {
 					// Both refusals — naming both references or neither, and a
 					// conversation id the wire would not read as a UUID — are decided
@@ -61,12 +63,14 @@ function addMessageCommands(parent: Command, program: Command): void {
 					// The plural call is the render boundary: it decrypts the rows
 					// concurrently, and owns the one decision this map could not — a transcript of unopenable group messages says
 					// why once, then marks, instead of repeating a paragraph per row.
-					const entries = await decryptThreadRows(
+					const decrypted = await decryptThreadRows(
 						configDir,
 						agentId,
 						data.messages ?? [],
 						client,
+						null,
 					);
+					const entries = withoutControlFrames(decrypted, opts.hideControl);
 
 					if (gOpts.json) {
 						printJson(entries);

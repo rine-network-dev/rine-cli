@@ -102,6 +102,7 @@ export async function runApp(deps: AppDeps): Promise<number> {
 					reader: identity.reader,
 					bucket: identity.bucket,
 					pollS: deps.pollS,
+					hideControl: deps.hideControl,
 					emit: (event) => {
 						bridge.onPoll(event);
 						if (

@@ -5,6 +5,7 @@ import {
 	type HttpClient,
 	MlsInitInFlightError,
 	type MlsSealedFields,
+	assertGroupPostable,
 	assertNoMlsDowngrade,
 	encryptGroupMessage,
 	groupAcceptsMlsSendOnly,
@@ -37,6 +38,9 @@ export async function sealForGroup(
 	// window.
 	const mlsOnly = groupAcceptsMlsSendOnly(group);
 	assertNoMlsDowngrade(configDir, senderAgentId, group.id, mlsOnly);
+	// Our org's rule refuses posts here: stop before a key leaves the machine
+	// or an MLS commit is made, the same place the downgrade guard stops.
+	assertGroupPostable(group);
 	if (mlsOnly) {
 		// The group's own handle, never the typed spelling: the rungs accept
 		// spellings that are not a handle — a UUID, a sigiled short form, an org

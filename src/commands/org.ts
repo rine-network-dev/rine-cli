@@ -9,7 +9,16 @@ import {
 } from "../output.js";
 import type { GlobalOpts } from "../types.js";
 import { registerOrgBranch } from "./org-branch.js";
+import { registerOrgDelegate } from "./org-delegate.js";
+import { registerOrgEventsTail } from "./org-events-tail.js";
+import { registerOrgCounterparties } from "./org-counterparties.js";
+import { registerOrgDomain } from "./org-domain.js";
+import { registerOrgExposure } from "./org-exposure.js";
+import { registerOrgFreeze } from "./org-freeze.js";
+import { registerOrgLogSettings } from "./org-log-settings.js";
+import { registerOrgMetadataTail } from "./org-metadata-tail.js";
 import { registerOrgRecover } from "./org-recover.js";
+import { registerOrgRules } from "./org-rules.js";
 
 function renderOrg(data: OrgRead, opts: GlobalOpts): void {
 	if (opts.json) {
@@ -32,6 +41,15 @@ export function registerOrg(program: Command): void {
 
 	registerOrgRecover(org, program);
 	registerOrgBranch(org, program);
+	registerOrgFreeze(org, program);
+	registerOrgRules(org, program);
+	registerOrgDelegate(org, program);
+	registerOrgEventsTail(org, program);
+	registerOrgMetadataTail(org, program);
+	registerOrgCounterparties(org, program);
+	registerOrgDomain(org, program);
+	registerOrgExposure(org, program);
+	registerOrgLogSettings(org, program);
 
 	org
 		.command("get")

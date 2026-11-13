@@ -5,6 +5,7 @@ import type { Command } from "commander";
 import { withClient } from "../action.js";
 import { actorOption } from "../actor.js";
 import { printJson, printTable, printText } from "../output.js";
+import { HIDE_CONTROL_HELP, withoutControlFrames } from "./hide-control.js";
 import { inboxRow, jsonRow, tableColumns } from "./messages-rows.js";
 
 /** Register `inbox` on the `message` command group. */
@@ -18,6 +19,7 @@ export function addInboxCommand(parent: Command, program: Command): void {
 		.option("--read", "Show only read messages")
 		.option("--limit <n>", "Maximum number of messages to return")
 		.option("--cursor <cursor>", "Pagination cursor")
+		.option("--hide-control", HIDE_CONTROL_HELP)
 		.action(
 			withClient(
 				program,
@@ -30,6 +32,7 @@ export function addInboxCommand(parent: Command, program: Command): void {
 						read?: boolean;
 						limit?: string;
 						cursor?: string;
+						hideControl?: boolean;
 					},
 				) => {
 					const flags = [opts.new, opts.delivered, opts.read].filter(Boolean);
@@ -53,10 +56,11 @@ export function addInboxCommand(parent: Command, program: Command): void {
 						params,
 					)) as PaginatedResponse<MessageRead>;
 
+					const items = withoutControlFrames(data.items, opts.hideControl);
 					if (gOpts.json) {
-						printJson({ ...data, items: data.items.map(jsonRow) });
+						printJson({ ...data, items: items.map(jsonRow) });
 					} else {
-						const rows = data.items.map(inboxRow);
+						const rows = items.map(inboxRow);
 						printTable(rows, tableColumns(rows));
 						if (data.next_cursor) {
 							printText(`Next cursor: ${data.next_cursor}`);

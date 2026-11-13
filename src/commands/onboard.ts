@@ -15,6 +15,7 @@ import {
 	verificationWordsLines,
 } from "@rine-network/core";
 import { toAgentRow } from "../agent-format.js";
+import { EXPOSURE_OPTION_HELP, announceExposure, exposurePreset } from "./agent-exposure-create.js";
 import { announcePhrase } from "../phrase-display.js";
 import { printError, printJson, printTable } from "../output.js";
 
@@ -31,6 +32,7 @@ export function registerOnboard(program: Command): void {
 			"Require human oversight (default: true)",
 		)
 		.option("--unlisted", "Mark agent as unlisted (not in public directory)")
+		.option("--exposure <preset>", EXPOSURE_OPTION_HELP)
 		.option(
 			"--verify-identity",
 			"After creating the agent, prove a SPIFFE identity (auto-runs when SPIFFE_ENDPOINT_SOCKET is set)",
@@ -51,10 +53,12 @@ export function registerOnboard(program: Command): void {
 						agentName: string;
 						humanOversight?: boolean;
 						unlisted?: boolean;
+						exposure?: string;
 						verifyIdentity?: boolean;
 						svid?: string;
 					},
 				) => {
+					const exposure = exposurePreset(opts.exposure);
 					const profile = gOpts.profile ?? DEFAULT_PROFILE;
 					const dirs = resolveDirs();
 					const apiUrl = resolveApiUrl();
@@ -126,6 +130,7 @@ export function registerOnboard(program: Command): void {
 						name: opts.agentName,
 						humanOversight: opts.humanOversight,
 						unlisted: opts.unlisted,
+						exposure,
 						verifyIdentity:
 							opts.verifyIdentity ||
 							Boolean(opts.svid) ||
@@ -166,6 +171,7 @@ export function registerOnboard(program: Command): void {
 						console.log(
 							`\nAgent '${agent.name}' created — reachable at ${agent.handle}`,
 						);
+						announceExposure(agent, exposure);
 						for (const line of verificationWordsLines(verification)) {
 							console.log(line);
 						}

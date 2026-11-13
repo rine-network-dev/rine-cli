@@ -147,7 +147,7 @@ export class Poller {
 
 	/** Fold a page into what is known; returns the messages the view has not seen in this form. */
 	#absorb(page: ReadPage): readonly ReadMessage[] {
-		const seen = this.#book.absorb(page, this.#now());
+		const seen = this.#book.absorb(page, this.#now(), this.#options.hideControl);
 		for (const finding of seen.findings) this.#emit({ type: "finding", finding });
 		return seen.changed;
 	}

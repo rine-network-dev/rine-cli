@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
 	NO_OWN_AGENTS,
 	NO_CONVERSATION,
+	admissionRow,
 	groupDetailRow,
 	groupRow,
 	memberRow,
@@ -217,5 +218,23 @@ describe("memberRow — whose agent this row is", () => {
 		const keys = Object.keys(memberRow(member()));
 		expect(keys.indexOf("Yours")).toBe(keys.indexOf("Role") + 1);
 		expect(keys[keys.length - 1]).toBe("Joined");
+	});
+});
+
+describe("admissionRow — a reason this client may not know", () => {
+	const skipped = (reason: string) =>
+		admissionRow({ agent_id: OWN_AGENT, status: "skipped", reason });
+
+	it("says the group-rule clause for org_rule, never the token", () => {
+		const reason = String(skipped("org_rule").Reason);
+
+		expect(reason).toMatch(/^refused by an organisation's group rule/);
+		expect(reason).not.toContain("org_rule");
+	});
+
+	it("quotes an unknown token back rather than throwing the row away", () => {
+		expect(skipped("some_future_reason").Reason).toBe(
+			"reason not recognised by this client: some_future_reason",
+		);
 	});
 });

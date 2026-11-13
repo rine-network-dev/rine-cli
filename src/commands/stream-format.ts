@@ -7,6 +7,7 @@ import {
 	SENDER_KEY_UNAVAILABLE_PREVIEW,
 	type SenderKeyExplainer,
 	isAuthenticityFailure,
+	isControlFrameType,
 	isDecryptableVersion,
 } from "@rine-network/core";
 import type { OpenedStreamMessage } from "./stream-open.js";
@@ -24,6 +25,8 @@ import type { OpenedStreamMessage } from "./stream-open.js";
 interface StreamLine {
 	readonly line: string;
 	readonly notice: string | null;
+	/** Whether the row is a control frame, which `--hide-control` leaves off the screen. */
+	readonly control: boolean;
 }
 
 /** The one-line preview of a message that has already been opened. */
@@ -34,6 +37,7 @@ export function renderOpened(
 	const ts = (data.created_at ?? "").slice(0, 19) || "?";
 	const sender = data.sender_handle ?? String(data.from_agent_id ?? "?");
 	const msgType = data.type ?? "?";
+	const control = isControlFrameType(data.type ?? "");
 	const target = data.group_handle
 		? `${data.group_handle} (${msgType})`
 		: msgType;
@@ -50,7 +54,11 @@ export function renderOpened(
 				: "[✗ invalid signature]";
 	} else if (result?.plaintext !== undefined) {
 		const verified = result.verified ? "✓" : "?";
-		preview = `[${verified}] ${result.plaintext.slice(0, 60)}`;
+		// A control frame's payload is machine-parsed key or invite data, not
+		// something to put on an operator's screen: the line names its type.
+		preview = control
+			? `[${verified}] [control] ${data.type}`
+			: `[${verified}] ${result.plaintext.slice(0, 60)}`;
 	} else if (unavailable !== null) {
 		// The line always carries the bounded marker; the explanation, if this
 		// stream has not given it yet, rides beside it as its own notice.
@@ -74,5 +82,5 @@ export function renderOpened(
 		// anything truer.
 		preview = "[decrypt failed]";
 	}
-	return { line: `[${ts}] ${sender} → ${target}: ${preview}`, notice };
+	return { line: `[${ts}] ${sender} → ${target}: ${preview}`, notice, control };
 }

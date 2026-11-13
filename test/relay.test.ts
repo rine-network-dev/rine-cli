@@ -586,6 +586,52 @@ describe("rine relay — lifecycle events", () => {
 		expect(process.exitCode).not.toBe(0);
 	});
 
+	it("a broker 4403 close then a refused re-bind ends the relay as tunnel_revoked with exit 1 (agent revoked)", async () => {
+		let calls = 0;
+		mockConnectTunnel.mockImplementation(async () => {
+			calls++;
+			if (calls > 1) {
+				// verify-binding is false for a revoked agent, so the broker NAKs the re-bind.
+				throw Object.assign(new Error("binding rejected: inactive"), {
+					revoked: true,
+				});
+			}
+			return {
+				close: vi.fn(),
+				onClose: (cb: (c: TunnelClose) => void) =>
+					cb({ code: 4403, clean: true }),
+			};
+		});
+		const out = captureStdout();
+		const program = makeProgram({ json: true });
+		await program.parseAsync([
+			"node",
+			"rine",
+			"relay",
+			"--agent",
+			AGENT_ID,
+			"--json",
+		]);
+
+		const states = out.lines
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(
+				(e): e is { event: string; data: Record<string, unknown> } =>
+					e?.event === "lifecycle",
+			)
+			.map((e) => e.data.state);
+		expect(calls).toBe(2);
+		expect(states).toContain("tunnel_reconnecting");
+		expect(states[states.length - 1]).toBe("tunnel_revoked");
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("no lifecycle event ever carries a request body or the HMAC secret", async () => {
 		const out = captureStdout();
 		const program = makeProgram({ json: true });

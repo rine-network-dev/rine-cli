@@ -15,6 +15,7 @@ import {
 import { withClient } from "../action.js";
 import { printError, printJson } from "../output.js";
 import { promptConfirm } from "../prompt.js";
+import { registerBranchHold } from "./org-freeze.js";
 
 const NO_ROOT =
 	"Creating a branch needs this org's root key (root.key in the owner directory). A delegate cannot create branches.";
@@ -35,6 +36,8 @@ export function registerOrgBranch(org: Command, program: Command): void {
 		.description(
 			"Delegate a subtree of this org to a partner; branch names are public, never put a customer name or a secret in one",
 		);
+
+	registerBranchHold(branch, program);
 
 	branch
 		.command("create <name>")

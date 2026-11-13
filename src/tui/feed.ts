@@ -25,6 +25,8 @@ export interface FeedOptions {
 	readonly agent: string | null;
 	readonly group: string | null;
 	readonly pollS: number;
+	/** Leave control frames out of the feed. */
+	readonly hideControl?: boolean;
 	readonly once: boolean;
 	readonly before: string | null;
 	/** The server's host, named in a network error's sentence. */
@@ -169,6 +171,7 @@ export async function runFeed(
 			emit,
 			now,
 			pollS: options.pollS,
+			hideControl: options.hideControl,
 			filter: { agentId: options.agent, groupId: options.group },
 		});
 

@@ -47,6 +47,7 @@ const HYBRID_MESSAGE: core.MessageRead = {
 const DECRYPT_RESULT = {
 	plaintext: JSON.stringify({ hello: "post-quantum" }),
 	senderKid: "rine:22222222-2222-2222-2222-222222222222",
+	verifyingKey: null,
 	verified: true,
 	verificationStatus: "verified" as const,
 };
@@ -107,6 +108,8 @@ describe("thread command — role-tagged transcript", () => {
 			verification_status: "verified" as const,
 			type: "rine.v1.task_request",
 			created_at: "2026-01-15T12:00:00Z",
+			from_agent_id: null,
+			sender_class: "other" as const,
 		},
 		{
 			direction: "received" as const,
@@ -115,6 +118,8 @@ describe("thread command — role-tagged transcript", () => {
 			verification_status: "verified" as const,
 			type: "rine.v1.task_response",
 			created_at: "2026-01-15T12:00:01Z",
+			from_agent_id: "22222222-2222-2222-2222-222222222222",
+			sender_class: "other" as const,
 		},
 	];
 

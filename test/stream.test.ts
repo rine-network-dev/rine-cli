@@ -13,6 +13,10 @@ vi.mock("@rine-network/core", async (importOriginal) => ({
 	fetchAgents: vi.fn(async () => [{ id: "agent-1", name: "bot" }]),
 	resolveAgent: vi.fn(async () => ({ agentId: "agent-1" })),
 	jitteredRefreshMargin: vi.fn(() => 60),
+	jitteredDelayMs: vi.fn(
+		((await importOriginal()) as typeof import("@rine-network/core"))
+			.jitteredDelayMs,
+	),
 	formatError: vi.fn((e: unknown) => String(e)),
 	agentKeysExist: vi.fn(() => false),
 	ingestSenderKeyDistribution: vi.fn(),
@@ -66,6 +70,8 @@ import {
 	GroupAuthenticityError,
 	decryptGroupMessageWithRecovery,
 	decryptMessage,
+	ingestSenderKeyDistribution,
+	jitteredDelayMs,
 } from "@rine-network/core";
 import { loadStreamCursor, saveStreamCursor } from "../src/commands/stream-cursor.js";
 import { exitWhenFlushed } from "../src/commands/stream-stop.js";
@@ -303,7 +309,7 @@ describe("rine stream", () => {
 			expect(reconnecting).toBeDefined();
 			expect(reconnecting.data.reason).toBe("server_close");
 			expect(reconnecting.data.attempt).toBe(2);
-			expect(reconnecting.data.backoff_ms).toBe(0);
+			expect(reconnecting.data.backoff_ms).toBeGreaterThan(0);
 		});
 
 		it("emits reconnecting with heartbeat_timeout reason", async () => {
@@ -370,6 +376,8 @@ describe("rine stream", () => {
 					Promise.resolve().then(() => _opts.onDisconnect?.());
 				}));
 			}
+			// server_close now waits out a backoff; no wait keeps these tests quick
+			for (let i = 0; i < 3; i++) vi.mocked(jitteredDelayMs).mockReturnValueOnce(0);
 
 			const program = makeProgram();
 			await program.parseAsync(["node", "rine", "stream", "--json"]);
@@ -394,6 +402,8 @@ describe("rine stream", () => {
 					Promise.resolve().then(() => _opts.onDisconnect?.());
 				}));
 			}
+			// server_close now waits out a backoff; no wait keeps these tests quick
+			for (let i = 0; i < 3; i++) vi.mocked(jitteredDelayMs).mockReturnValueOnce(0);
 
 			const program = makeProgram();
 			await program.parseAsync(["node", "rine", "stream", "--json"]);
@@ -700,7 +710,10 @@ describe("rine stream", () => {
 		/** The server-authenticated sender of the streamed events below. */
 		const PEER_ID = "22222222-2222-2222-2222-222222222222";
 
-		async function previewOf(payload: Record<string, unknown>): Promise<string> {
+		async function previewOf(
+			payload: Record<string, unknown>,
+			...flags: string[]
+		): Promise<string> {
 			const out = captureStdout();
 			const stderr = captureStderr();
 
@@ -718,7 +731,7 @@ describe("rine stream", () => {
 			}) as any);
 
 			const program = makeProgram();
-			await program.parseAsync(["node", "rine", "stream"]);
+			await program.parseAsync(["node", "rine", "stream", ...flags]);
 			// The preview is formatted asynchronously and can settle after the
 			// SIGINT-terminated loop returns — drain the queue before asserting.
 			for (let i = 0; i < 5; i++) {
@@ -881,6 +894,68 @@ describe("rine stream", () => {
 				CREATED_AT,
 			);
 			expect(line).toContain("[\u2713] dm-hybrid-hello");
+		});
+
+		it("test_stream_when_the_row_is_a_control_frame_then_the_line_names_its_type_and_shows_no_payload", async () => {
+			mockDecryptDm.mockResolvedValue(decrypted("secret-key-bytes"));
+
+			for (const type of ["rine.v1.sender_key_distribution", "rine.v1.group_invite"]) {
+				const line = await previewOf({
+					from_agent_id: PEER_ID,
+					type,
+					encryption_version: "hpke-hybrid-v2",
+					encrypted_payload: "AwQF",
+					created_at: CREATED_AT,
+				});
+
+				expect(line).toContain(`[\u2713] [control] ${type}`);
+				expect(line).not.toContain("secret-key-bytes");
+			}
+			expect(vi.mocked(ingestSenderKeyDistribution)).toHaveBeenCalledWith(
+				"/fake/config",
+				"agent-1",
+				"rine.v1.sender_key_distribution",
+				expect.anything(),
+			);
+		});
+
+		it("test_stream_when_hide_control_is_set_then_a_control_frame_is_not_printed_but_is_still_ingested", async () => {
+			mockDecryptDm.mockResolvedValue(decrypted("secret-key-bytes"));
+			const control = {
+				from_agent_id: PEER_ID,
+				type: "rine.v1.sender_key_distribution",
+				encryption_version: "hpke-hybrid-v2",
+				encrypted_payload: "AwQF",
+				created_at: CREATED_AT,
+			};
+
+			expect(await previewOf(control, "--hide-control")).toBe("");
+			expect(vi.mocked(ingestSenderKeyDistribution)).toHaveBeenCalled();
+
+			expect(await previewOf({ ...control, type: "rine.v1.dm" }, "--hide-control")).toContain(
+				"secret-key-bytes",
+			);
+		});
+
+		it("test_stream_when_hide_control_is_set_then_json_omits_a_control_frame_and_keeps_the_rest", async () => {
+			const out = captureStdout();
+			mockCreateEventSource.mockImplementationOnce(((opts: any) => {
+				const es = { close: vi.fn() };
+				Promise.resolve().then(() => {
+					for (const type of ["rine.v1.group_invite", "rine.v1.dm"]) {
+						opts.onMessage({ event: "message", data: JSON.stringify({ type }), id: null });
+					}
+					Promise.resolve().then(() => fireSigint());
+				});
+				return es;
+			}) as any);
+
+			await makeProgram().parseAsync(["node", "rine", "--json", "stream", "--hide-control"]);
+			out.restore();
+
+			const messages = out.lines.filter((l) => l.includes('"event":"message"'));
+			expect(messages).toHaveLength(1);
+			expect(messages[0]).toContain("rine.v1.dm");
 		});
 
 		it("names the cause when a sender key never arrived, not just the failure", async () => {

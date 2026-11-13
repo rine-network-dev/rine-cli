@@ -4,6 +4,7 @@
  */
 import {
 	findingKey,
+	isControlFrameType,
 	type ReadFinding,
 	ReadGapReason,
 	type ReadMessage,
@@ -58,15 +59,20 @@ export class RowBook {
 		this.#newestMicros = null;
 	}
 
-	/** A finding is told once per group, so equal gaps from two groups both reach the user. */
-	absorb(page: ReadPage, nowMs: number): Absorbed {
+	/**
+	 * A finding is told once per group, so equal gaps from two groups both reach the user. With
+	 * `hideControl`, group-key and group-invite control frames are still folded in (the window moves
+	 * past them) but are never reported as changed, so the view never shows them.
+	 */
+	absorb(page: ReadPage, nowMs: number, hideControl = false): Absorbed {
 		const changed: ReadMessage[] = [];
 		const ceiling = (nowMs + FUTURE_CLAMP_MS) * 1000;
 		for (const message of page.items) {
 			const micros = Math.min(message.row.createdAtMicros, ceiling);
 			this.#newestMicros = Math.max(this.#newestMicros ?? micros, micros);
 			const shown = this.#fold(message);
-			if (shown !== null) changed.push(shown);
+			if (shown !== null && !(hideControl && isControlFrameType(message.row.type)))
+				changed.push(shown);
 		}
 		const findings = page.findings.filter((finding) => {
 			const key = findingKey(finding);

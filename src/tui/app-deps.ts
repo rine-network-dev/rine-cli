@@ -8,6 +8,8 @@ export interface AppDeps {
 	readonly host: string;
 	readonly pollS: number;
 	readonly ascii: boolean;
+	/** Leave control frames out of the view. */
+	readonly hideControl?: boolean;
 	readonly env: NodeJS.ProcessEnv;
 	readonly stdin: TermOptions["stdin"];
 	readonly stdout: TermOptions["stdout"] & CapsInput["stream"];

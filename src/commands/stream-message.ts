@@ -18,6 +18,7 @@ import {
 	raceDeadline,
 } from "@rine-network/core";
 import { printError } from "../output.js";
+import { isControlEventData } from "./hide-control.js";
 import { messageEventLine } from "./stream-cleartext.js";
 import { renderOpened } from "./stream-format.js";
 import { isSettledMessage, openStreamMessage } from "./stream-open.js";
@@ -32,6 +33,12 @@ export interface StreamEnv {
 	json: boolean;
 	monitor?: boolean;
 	verbose?: boolean;
+	/**
+	 * Keep control frames off the screen. They are still opened (a sender-key
+	 * distribution is how the next group message becomes readable), acknowledged
+	 * once settled, and their stderr notice still prints.
+	 */
+	hideControl?: boolean;
 	agentId: string;
 	configDir: string;
 	client: HttpClient;
@@ -78,6 +85,7 @@ export async function closeStreamEnv(
 /** Open the row, queue its ack when it settled, and print it in human mode. */
 async function settleAndPrint(env: StreamEnv, dataStr: string): Promise<void> {
 	let line: string;
+	let control = false;
 	try {
 		const opened = await openStreamMessage(
 			dataStr,
@@ -91,12 +99,13 @@ async function settleAndPrint(env: StreamEnv, dataStr: string): Promise<void> {
 		const rendered = renderOpened(opened, env.explain);
 		if (rendered.notice !== null) printError(rendered.notice);
 		line = rendered.line;
+		control = rendered.control;
 	} catch {
 		// A frame that does not parse has no verdict: it is not acknowledged.
 		if (env.json) return;
 		line = `[message] ${dataStr.slice(0, 80)}`;
 	}
-	console.log(line);
+	if (!(env.hideControl && control)) console.log(line);
 }
 
 export function handleStreamEvent(
@@ -105,7 +114,10 @@ export function handleStreamEvent(
 ): void {
 	if (event === "heartbeat") void env.acks.flush();
 	if (env.json) {
-		if (!env.monitor || event === "message") {
+		// `--json` prints the raw event, so `--hide-control` only drops the line.
+		const hidden =
+			env.hideControl && event === "message" && isControlEventData(data);
+		if ((!env.monitor || event === "message") && !hidden) {
 			console.log(messageEventLine(event, id, data));
 		}
 	} else if (event === "heartbeat" && env.verbose) {

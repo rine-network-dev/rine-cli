@@ -16,8 +16,17 @@ export interface ReconnectContext {
 	attempt: number;
 	/** Backoff, in seconds, before this attempt's jitter. */
 	backoff: number;
+	/** When the attempt began (ms since the epoch): a long-lived connection earns a fresh backoff. */
+	startedAt: number;
 	/** Fires when the stream is told to stop, which cuts the backoff short. */
 	stopping: AbortSignal;
+}
+
+/** A connection that lasted this long was healthy: its ending starts the backoff over. */
+export const HEALTHY_CONNECTION_MS = 30_000;
+
+function backoffAfter({ backoff, startedAt }: ReconnectContext): number {
+	return Date.now() - startedAt >= HEALTHY_CONNECTION_MS ? 1 : backoff;
 }
 
 /**
@@ -26,8 +35,10 @@ export interface ReconnectContext {
  */
 export async function afterDisconnect(
 	reason: DisconnectReason,
-	{ gOpts, monitor, attempt, backoff, stopping }: ReconnectContext,
+	ctx: ReconnectContext,
 ): Promise<number | null> {
+	const { gOpts, monitor, attempt, stopping } = ctx;
+	const backoff = backoffAfter(ctx);
 	if (reason === "signal") {
 		emitLifecycle(gOpts, monitor, { state: "stopped", reason: "signal" });
 		return null;
@@ -48,19 +59,22 @@ export async function afterDisconnect(
 		await sleepWithSignal(jittered, stopping);
 		return nextReconnectBackoffSeconds(backoff);
 	}
-	// Server-initiated close (heartbeat limit or clean close)
+	// Server-initiated close (heartbeat limit or clean close): a 200 stream that closes at once
+	// backs off like any other failure, so it cannot spin.
+	const jittered = jitteredDelayMs(backoff);
 	emitLifecycle(gOpts, monitor, {
 		state: "reconnecting",
 		reason: "server_close",
 		attempt: attempt + 1,
-		backoff_ms: 0,
+		backoff_ms: jittered,
 	});
 	if (!gOpts.json) {
 		process.stderr.write(
 			`Reconnecting (attempt ${attempt + 1}, server close)...\n`,
 		);
 	}
-	return 1;
+	await sleepWithSignal(jittered, stopping);
+	return nextReconnectBackoffSeconds(backoff);
 }
 
 /**
@@ -70,8 +84,10 @@ export async function afterDisconnect(
 export async function afterError(
 	err: unknown,
 	stopped: boolean,
-	{ gOpts, monitor, verbose, attempt, backoff, stopping }: ReconnectContext,
+	ctx: ReconnectContext,
 ): Promise<number | null> {
+	const { gOpts, monitor, verbose, attempt, stopping } = ctx;
+	const backoff = backoffAfter(ctx);
 	if (stopped) {
 		emitLifecycle(gOpts, monitor, { state: "stopped", reason: "signal" });
 		return null;

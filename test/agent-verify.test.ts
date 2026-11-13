@@ -107,7 +107,7 @@ describe("rine agent verify", () => {
 		expect(printed).toContain("me@myorg");
 		// The peer's words come off its PUBLIC card — the reason this flow needs
 		// no server change.
-		expect(gets).toContain(`/directory/agents/${PEER_ID}`);
+		expect(gets).toContain(`/agents/${PEER_ID}/card`);
 	});
 
 	it("records nothing when the operator does not confirm", async () => {

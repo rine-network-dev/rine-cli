@@ -12,8 +12,10 @@ import {
 } from "@rine-network/core";
 import {
 	type DisconnectReason,
+	StreamHttpError,
 	openStreamConnection,
 } from "./stream-connection.js";
+import { STREAM_HIDE_CONTROL_HELP } from "./hide-control.js";
 import { loadStreamCursor, saveStreamCursor } from "./stream-cursor.js";
 import { emitLifecycle } from "./stream-lifecycle.js";
 import {
@@ -32,6 +34,7 @@ interface StreamOpts {
 	persistent?: boolean;
 	heartbeatTimeout?: string;
 	monitor?: boolean;
+	hideControl?: boolean;
 }
 
 export function registerStream(program: Command): void {
@@ -49,6 +52,7 @@ export function registerStream(program: Command): void {
 			"70",
 		)
 		.option("--monitor", "Suppress non-message stdout (for CC plugin monitors)")
+		.option("--hide-control", STREAM_HIDE_CONTROL_HELP)
 		.action(async (opts: StreamOpts, command: Command) => {
 			try {
 				const gOpts = program.opts<GlobalOpts>();
@@ -78,6 +82,7 @@ export function registerStream(program: Command): void {
 				);
 				let backoff = 1;
 				let attempt = 0;
+				let mintFresh = false; // set by a 401: the cached token is dead
 				// Drawn once for this long-lived stream so co-located agents
 				// desynchronize their token refreshes across reconnects.
 				const refreshMargin = jitteredRefreshMargin();
@@ -98,6 +103,7 @@ export function registerStream(program: Command): void {
 					json: Boolean(gOpts.json),
 					monitor: opts.monitor,
 					verbose: opts.verbose,
+					hideControl: opts.hideControl,
 					agentId,
 					configDir,
 					client,
@@ -108,17 +114,20 @@ export function registerStream(program: Command): void {
 
 				while (!stop.stopped) {
 					attempt++;
+					const startedAt = Date.now();
 					const reconnect = () => ({
 						gOpts,
 						monitor: opts.monitor,
 						verbose: opts.verbose,
 						attempt,
 						backoff,
+						startedAt,
 						stopping: stop.signal,
 					});
 
 					try {
-						const token = await mintToken({ refreshMargin });
+						const token = await mintToken({ refreshMargin, force: mintFresh });
+						mintFresh = false;
 						// Peek on every connect: the server marks nothing delivered at
 						// yield, and a row is acknowledged below once it has settled.
 						const headers: Record<string, string> = withPeekHeader(
@@ -137,7 +146,6 @@ export function registerStream(program: Command): void {
 							attempt,
 							url,
 						});
-
 						let reason: DisconnectReason = "server_close";
 						if (!stop.stopped) {
 							const connection = openStreamConnection({
@@ -170,11 +178,11 @@ export function registerStream(program: Command): void {
 							reason = await connection.closed;
 							stop.onStop(undefined);
 						}
-
 						const next = await afterDisconnect(reason, reconnect());
 						if (next === null) break;
 						backoff = next;
 					} catch (err) {
+						mintFresh = err instanceof StreamHttpError && err.status === 401;
 						const next = await afterError(err, stop.stopped, reconnect());
 						if (next === null) break;
 						backoff = next;

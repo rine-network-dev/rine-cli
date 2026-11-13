@@ -18,6 +18,7 @@ import {
 	isA2aCleartext,
 	isAuthenticityFailure,
 	markA2aCleartext,
+	unreadableByOrgsSentence,
 } from "@rine-network/core";
 import { printJson, printTable } from "../output.js";
 
@@ -51,6 +52,8 @@ export function printSent(data: MessageRead, json: boolean | undefined): void {
 		printJson(data);
 	} else {
 		printTable([sendRow(data)]);
+		const unreadable = unreadableByOrgsSentence(data.unreadable_by_orgs);
+		if (unreadable) console.log(unreadable);
 	}
 }
 

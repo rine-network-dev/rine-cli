@@ -328,6 +328,22 @@ describe("rine send — an MLS send goes through the core seal-and-post", () => 
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("send_when_no_member_could_be_given_the_sender_key_then_it_exits_non_zero_with_the_refusal", async () => {
+		stubServer(makeGroup());
+		getOrCreateSenderKey.mockRejectedValue(
+			new core.SenderKeyUndeliveredError(GROUP_ID),
+		);
+
+		await send();
+
+		expect((thrown as Error).message).toBe(core.SENDER_KEY_UNDELIVERED_REFUSAL);
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining(core.SENDER_KEY_UNDELIVERED_REFUSAL),
+		);
+		expect(process.exitCode).toBe(1);
+		expect(posts).toEqual([]);
+	});
+
 	it("send_when_the_group_is_sender_key_then_no_mls_seal_runs", async () => {
 		stubServer(makeGroup());
 

@@ -47,6 +47,8 @@ export interface PollerOptions {
 	readonly pollS?: number;
 	/** Reads the slice of one agent or group from the start. */
 	readonly filter?: DataFilter;
+	/** Leaves group-key and group-invite control frames out of the rows it reports. */
+	readonly hideControl?: boolean;
 	/** Milliseconds. */
 	readonly now?: () => number;
 }

@@ -8,11 +8,13 @@ import { runFeed } from "../tui/feed.js";
 import { resolveIdentity } from "../tui/identity.js";
 import { fatalLine } from "../tui/term.js";
 import type { GlobalOpts } from "../types.js";
+import { HIDE_CONTROL_HELP } from "./hide-control.js";
 
 const POLL_MAX_S = 120;
 
 interface TuiOpts {
 	ascii?: boolean;
+	hideControl?: boolean;
 	feed?: boolean;
 	once?: boolean;
 	before?: string;
@@ -50,6 +52,7 @@ async function runTui(
 				host,
 				pollS,
 				ascii: opts.ascii === true,
+				hideControl: opts.hideControl,
 				env: process.env,
 				stdin: process.stdin,
 				stdout: process.stdout,
@@ -61,6 +64,7 @@ async function runTui(
 				agent: opts.agent ?? null,
 				group: opts.group ?? null,
 				pollS,
+				hideControl: opts.hideControl,
 				once: opts.once === true,
 				before: opts.before ?? null,
 				host,
@@ -80,6 +84,7 @@ export function registerTui(program: Command): void {
 			"Read the messages of every agent in your org in a terminal view (needs the org key)",
 		)
 		.option("--ascii", "draw with plain ASCII characters")
+		.option("--hide-control", HIDE_CONTROL_HELP)
 		// The plugin's line feed: not documented, because running it is the same as holding the
 		// org read key.
 		.addOption(new Option("--feed", "NDJSON feed of the same rows").hideHelp())

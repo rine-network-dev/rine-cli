@@ -1,0 +1,47 @@
+{
+	"envelope": {
+		"schema": "rine.org_event.v1",
+		"id": "33333333-3333-4333-8333-333333333333",
+		"seq": 7,
+		"chain_epoch": 1,
+		"org_id": "22222222-2222-4222-8222-222222222222",
+		"kind": "agent.first_external_contact",
+		"occurred_at": "2026-11-09T10:00:00.000000Z",
+		"detail": {},
+		"prev_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	},
+	"hec": {
+		"url": "https://splunk.example:8088/services/collector/event",
+		"authorization": "Splunk s3cret-token",
+		"line": {
+			"time": 1794218400,
+			"source": "rine",
+			"sourcetype": "rine:org_event",
+			"event": "<envelope>",
+			"fields": {
+				"org_id": "22222222-2222-4222-8222-222222222222",
+				"chain_epoch": 1,
+				"seq": 7,
+				"kind": "agent.first_external_contact",
+				"signal": "alert"
+			}
+		}
+	},
+	"otlp": {
+		"url": "https://otel.example:4318/v1/logs",
+		"record": {
+			"timeUnixNano": "1794218400000000000",
+			"severityNumber": 13,
+			"severityText": "WARN",
+			"body": "<envelope as a JSON string>",
+			"attributes": [
+				{ "key": "rine.org_id", "value": { "stringValue": "22222222-2222-4222-8222-222222222222" } },
+				{ "key": "rine.chain_epoch", "value": { "intValue": "1" } },
+				{ "key": "rine.seq", "value": { "intValue": "7" } },
+				{ "key": "rine.kind", "value": { "stringValue": "agent.first_external_contact" } },
+				{ "key": "rine.signal", "value": { "stringValue": "alert" } }
+			]
+		}
+	}
+}

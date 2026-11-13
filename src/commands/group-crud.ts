@@ -4,6 +4,7 @@ import {
 	type ListResponse,
 	VOTE_DURATION_RULE,
 	groupIsMls,
+	postingLine,
 } from "@rine-network/core";
 import type { Command } from "commander";
 import { type ActionContext, withClient } from "../action.js";
@@ -96,21 +97,19 @@ export function registerGroupCrud(program: Command, group: Command): void {
 					});
 					return;
 				}
-				// One `GET /agents` so the seated ids print as handles, and
-				// only when there is a seat to spell. A caller who names no actor
-				// has paid for no agent list yet — that cost was accepted
-				// deliberately; one who typed `--agent` by name or handle has
-				// already bought it and `ctx.agents()` hands the same list back. On
-				// a group the credential holds no seat in the row prints
-				// `NO_OWN_AGENTS` whatever the map says, so buying
-				// one would answer nothing. Same gate the Python side takes in
-				// `rine._agent_handles._seats_to_spell`. A list that fails to load
-				// prints the UUIDs rather than failing a read that succeeded.
+				// One `GET /agents` so seated ids print as handles, and only when
+				// there is a seat to spell: a caller who names no actor has paid for
+				// no agent list yet (`--agent` already bought it; `ctx.agents()`
+				// memoises), and a group the credential holds no seat in prints
+				// `NO_OWN_AGENTS` whatever the map says. Same gate as the Python
+				// `rine._agent_handles._seats_to_spell`. A failed list prints UUIDs.
 				const handles = data.member_agent_ids?.length
 					? await ownAgentHandles(ctx.agents)
 					: undefined;
 				printTable([groupDetailRow(data, handles)]);
 				printText(encryptionLine(data, CLI_UNFOUNDED_REPAIR));
+				const posting = postingLine(data);
+				if (posting) printText(posting);
 				if (evicted) printText(`\n${evictedMessage(data.id)}`);
 			}),
 		);

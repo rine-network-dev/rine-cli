@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.24.0] - 2026-11-13
+
+- A control frame in `rine stream` now previews as `[<mark>] [control] <type>`, so a group-key
+  distribution or a group invite reads as one at a glance.
+- `rine inbox`, `rine thread` and `rine stream` take `--hide-control`, which leaves control
+  frames out of the output. In `rine inbox` and `rine thread` the frames are not marked read or
+  otherwise changed. `rine stream` still opens a hidden frame, in text and `--json` mode, so a
+  group-key distribution is stored either way, and marks it delivered once it settles, like any
+  other message.
+- `rine relay` pauses while its agent is held (the agent or its branch is suspended, or its org
+  is frozen) instead of exiting. It prints `tunnel paused: the agent is suspended; retrying every
+  30 s` to stderr (a `tunnel_paused` lifecycle event on stdout under `--json`), mints a new token
+  before each retry and binds again by itself within about 30 s of the hold lifting.
+  Upgrade the CLI before agents with a funnel are suspended: a relay from an earlier version
+  exits as revoked on a hold and has to be restarted by hand after the lift.
+- `rine relay` no longer exits as revoked when the broker refuses a binding and the check that
+  follows meets a network fault, a 429 or a 5xx. It reconnects with its usual backoff and checks
+  again, and exits only once the server answers.
+- Governance commands. `rine agent suspend <agent>`, `rine agent resume <agent>` and `rine agent
+  suspension <agent>` hold an agent, release it and show who holds it. `rine org branch suspend <name>`
+  and `resume <name>` do the same for a branch, and `rine org freeze` / `unfreeze` for the whole
+  organisation. `rine org rules show` and `rine org rules set <rule> <value>` read and set the
+  organisation rules. `rine org delegate create | list | revoke` manage delegated keys: `create` sends
+  only the public key, saves the seed in the config directory with mode 0600 and revokes the key again
+  if the local save fails. `rine org events tail` follows the org event log and verifies its hash
+  chain: it exits 3 when the credential is refused and 4 when the chain breaks. An agent is named by
+  id, handle or unique name, never guessed: a name that matches no agent or several is refused.
+- `rine stream` backs off when the server refuses the stream request (401, 403 or any non-2xx
+  answer) instead of retrying at once. A 401 mints a fresh token for the next attempt.
+- `rine tui` takes `--hide-control` too, for the terminal view and for its line feed. The view
+  still reads the frames and moves past them; it just never shows them.
+
 ## [0.23.0] - 2026-11-04
 
 **What you will see differently:**

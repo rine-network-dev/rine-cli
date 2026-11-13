@@ -22,8 +22,10 @@ import {
 } from "./relay-hook.js";
 import { emitLifecycle } from "./relay-lifecycle.js";
 import {
-	isRevoked,
+	RelayFailure,
+	exitRevoked,
 	reconnectAfterError,
+	settleFailure,
 	waitForClose,
 } from "./relay-reconnect.js";
 import { prepareTier } from "./relay-tier.js";
@@ -57,6 +59,7 @@ export async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 	let backoff = 1;
 	let attempt = 0;
 	let stopped = false;
+	let paused = false; // while the agent is held, the cached token predates the hold
 	// Drawn once for this long-lived relay so co-located agents desynchronize their
 	// token refreshes across reconnects.
 	const refreshMargin = jitteredRefreshMargin();
@@ -120,7 +123,7 @@ export async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 			// before the upgrade. A cold/renewal issuance can block for the grace
 			// delay + poll (~3 min); a token fetched before it could expire (cache
 			// floor is 60s) and the broker would NAK the BIND — or worse, revoke.
-			const token = await mintToken({ refreshMargin });
+			const token = await mintToken({ refreshMargin, force: paused });
 
 			// (2) Control WS + mux tunnel. Bearer at the upgrade; the
 			// backend validates the full org→agent→hostname chain.
@@ -136,7 +139,8 @@ export async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 			await tier.listen(port, (live) => {
 				listener = live;
 			});
-			backoff = 1; // a clean re-establish resets the backoff
+			backoff = 1; // a clean re-establish resets the backoff and the pause
+			paused = false;
 
 			const close = await waitForClose(tunnel, () => stopped, (stop) => {
 				stopConnection = stop;
@@ -172,16 +176,14 @@ export async function runRelayLoop(ctx: RelayCtx): Promise<void> {
 				process.exitCode = 2;
 				return;
 			}
-			if (isRevoked(err)) {
-				// Do NOT revoke/wipe the per-agent wildcard on a single
-				// hook's BIND-revoked — it is SHARED across every other live hook of the
-				// agent, so revoking here would kill all of them. The kill switch is
-				// server-side DNS+route teardown; the relay just exits.
-				cert.stop();
-				emitLifecycle(json, { state: "tunnel_revoked" });
-				process.exitCode = 1;
-				return;
+			const failure = await settleFailure(err, mintToken, json, (stop) => {
+				stopConnection = stop;
+			});
+			if (failure === RelayFailure.Paused) {
+				paused = true;
+				continue;
 			}
+			if (failure === RelayFailure.Revoked) return exitRevoked(cert, json);
 			backoff = await reconnectAfterError(json, attempt, backoff, () => {
 				if (opts.verbose)
 					process.stderr.write(
